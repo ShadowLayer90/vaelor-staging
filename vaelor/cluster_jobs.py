@@ -8,7 +8,7 @@ from .cluster_node_removal import removal_message
 from .cluster_operations import ClusterOperations
 from .gpu_memory_pool_nodes import (
     NODE_GPU_MEMORY_JOB, NODE_REBOOT_JOB, PROGRESS_MESSAGE, change_worker_pool,
-    reboot_worker,
+    reboot_worker, save_recommended_on_worker,
 )
 from .job_vocabulary import (
     CLUSTER_AGENT_DEPLOY_JOB,
@@ -42,12 +42,21 @@ def execute_cluster_job(
     if job_type == "cluster.node.join":
         checkpoint(20, "Verifying the worker and preparing Docker", "starting")
         result = operations.join_node(job["payload"])
+        # VD-161 amended (owner, 2026-10-20): a worker with no saved GPU
+        # memory pool size gets the recommended one; never restarted, and a
+        # failure is said here without failing the join.
+        checkpoint(70, "Saving the recommended GPU memory pool size if none is saved", "starting")
+        # A retried join of a worker already joined saves nothing: it must not
+        # undo the owner's Remove setting made since (review 4).
+        pool_note = ("" if result.get("already_joined")
+                     else save_recommended_on_worker(operations, result["node_id"]))
         # VD-194 P2: the join ends by queuing the worker's profile, which runs
         # next (one job at a time) and lays the telemetry agent down with it.
         queue_profile_job(store, result["node_id"], JOINED_REASON)
         return store.finish(
             job["id"], state="healthy",
-            message="Worker joined and placement labels applied", result=result,
+            message="Worker joined and placement labels applied" + (". " + pool_note if pool_note else ""),
+            result={**result, "gpu_memory_pool": pool_note},
         )
     if job_type == "cluster.node.availability":
         checkpoint(30, "Changing worker scheduling availability", "starting")

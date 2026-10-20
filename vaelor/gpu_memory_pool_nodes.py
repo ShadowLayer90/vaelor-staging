@@ -44,6 +44,7 @@ without anyone pressing Recheck.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -54,6 +55,8 @@ from .gpu_memory_pool_apply import BOOT_IMAGE_TOOLS
 from .ssh_transport import (
     COMMAND_ENDED_WITHOUT_REASON, SshTransport, SshTransportError,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 HOST_GPU_MEMORY_JOB = "host.gpu-memory.apply"
 NODE_GPU_MEMORY_JOB = "cluster.node.gpu-memory"
@@ -197,25 +200,35 @@ def removed_by_owner(job_store: Any, node_id: str, boot_time: Any) -> Optional[b
     ``False``, the side that never offers the shrinking restart as the fix.
     """
     placed = type(boot_time) is int and boot_time > 0
-    controller = node_id == CONTROLLER_PLACEMENT_ID
-    job_type = HOST_GPU_MEMORY_JOB if controller else NODE_GPU_MEMORY_JOB
     try:
-        jobs = job_store.list_of_type(job_type) if job_store is not None else []
+        job = last_pool_change(job_store, node_id)
     except Exception:  # noqa: BLE001 - unreadable is "not known to be chosen"
         return False
-    for job in jobs:
+    if job is None or job["payload"].get("action") != ACTION_REVERT:
+        return False
+    if not placed:
+        return None
+    finished = job.get("updated_at")
+    return isinstance(finished, (int, float)) and finished / 1000 > boot_time
+
+
+def last_pool_change(job_store: Any, node_id: str) -> Optional[Dict[str, Any]]:
+    """The last pool change Vaelor finished on ``node_id`` (its job), or ``None``.
+
+    The one reading of the history behind :func:`removed_by_owner` and the
+    update step's "the owner removed it last" (VD-161 amended). Raises when
+    the store cannot be read: each caller decides what unreadable means.
+    """
+    controller = node_id == CONTROLLER_PLACEMENT_ID
+    job_type = HOST_GPU_MEMORY_JOB if controller else NODE_GPU_MEMORY_JOB
+    for job in job_store.list_of_type(job_type) if job_store is not None else []:
         payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
         if job.get("state") != "completed":
             continue
         if not controller and str(payload.get("node_id") or "") != node_id:
             continue
-        if payload.get("action") != ACTION_REVERT:
-            return False
-        if not placed:
-            return None
-        finished = job.get("updated_at")
-        return isinstance(finished, (int, float)) and finished / 1000 > boot_time
-    return False
+        return {**job, "payload": payload}
+    return None
 
 
 # --- this controller ------------------------------------------------------
@@ -388,13 +401,24 @@ def change_worker_pool(
     if payload.get("confirm") != NODE_GPU_MEMORY_CONFIRM:
         raise ValueError("Review and confirm this machine's GPU memory pool change first.")
     node = _node(operations, payload)
-    name = str(node.get("name") or node["id"])
     gpu = (node.get("inventory") or {}).get("gpu")
     transport = _transport(operations, node, transport_factory)
-    facts = read_node_facts(transport)
-    status = pool.pool_status(facts, gpu)
+    status = pool.pool_status(read_node_facts(transport), gpu)
+    return _change_node(operations, node, transport, status, action, payload.get("size_gib"), now)
+
+
+def _change_node(
+    operations: Any, node: Dict[str, Any], transport: Any, status: Dict[str, Any],
+    action: str, size: Any, now: Callable[[], float],
+) -> Dict[str, Any]:
+    """Set or remove one worker's setting over ``transport``, from ``status`` read on it.
+
+    The one worker write, shared by the owner's confirmed job and the join's
+    recommended size (VD-161 amended): bounds, roll-back and read-back alike.
+    """
+    name = str(node.get("name") or node["id"])
+    gpu = (node.get("inventory") or {}).get("gpu")
     if action == ACTION_SET:
-        size = payload.get("size_gib")
         pages: Optional[int] = pool.require_size_gib(size, status)
         wanted: Optional[str] = pool.render_config(pages)
         now_holds = pool.file_now_holds(size)
@@ -457,6 +481,43 @@ def change_worker_pool(
             except (RuntimeError,) + _FAILURES:
                 reading = pool.unknown_after_change(name)
             record_reading(operations, node["id"], reading, now)
+
+
+def save_recommended_on_worker(
+    operations: Any, node_id: str,
+    transport_factory: Optional[Callable[..., Any]] = None,
+    now: Callable[[], float] = time.time,
+) -> str:
+    """At a join: save the recommended size on a worker that has none; one sentence. Never raises.
+
+    VD-161 amended (owner, 2026-10-20): the freshly joined ZBook's first card
+    read "Shrinks at restart" because the purge had removed its saved size.
+    The decision is `gpu_memory_pool.recommended_save`, the controller's too;
+    the write is :func:`_change_node`, the owner's job's own. The worker is
+    never restarted. A failure is said in the join's own message and leaves
+    the card's choice open; the join itself stands (LESSONS 1: said, not
+    swallowed).
+    """
+    node = operations.store.get_node(str(node_id), include_credential=True)
+    if not isinstance(node, dict):
+        return ""
+    name = str(node.get("name") or node.get("id") or node_id)
+    try:
+        transport = _transport(operations, node, transport_factory or SshTransport)
+        status = pool.pool_status(read_node_facts(transport), (node.get("inventory") or {}).get("gpu"))
+        size, why = pool.recommended_save(status)
+        if size is None:
+            record_reading(operations, node["id"], status, now)
+            return "{}: {}".format(name, why)
+        changed = _change_node(operations, node, transport, status, ACTION_SET, size, now)
+        return "{}: {}".format(name, pool.recommended_saved_message(size, changed["status"]))
+    except (ValueError, RuntimeError) + _FAILURES as error:
+        return "{}: the recommended GPU memory pool size was not saved: {} Choose a size in {}.".format(
+            name, str(error).rstrip(".") + ".", pool.SETTING_PLACE)
+    except Exception:  # noqa: BLE001 - logged with its traceback; the join stands
+        LOGGER.exception("could not save the recommended GPU memory pool size on node %s", node_id)
+        return ("{}: the recommended GPU memory pool size was not saved (an internal error, "
+                "logged). Choose a size in {}.".format(name, pool.SETTING_PLACE))
 
 
 def _boot_id(transport: Any) -> str:

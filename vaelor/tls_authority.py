@@ -84,6 +84,9 @@ class Layout:
     leaf_key: str
     fleet_state: str
     controller_trust_template: str
+    #: The box's text login screen snippet (tls_paths.CONSOLE_ISSUE); a field,
+    #: not a default, so a test's layout can never write the real /etc/issue.d.
+    console_issue: str
 
     @classmethod
     def default(cls) -> "Layout":
@@ -98,6 +101,7 @@ class Layout:
             leaf_key=tls_paths.leaf_key(),
             fleet_state=tls_paths.FLEET_TRUST_STATE,
             controller_trust_template=tls_paths.CONTROLLER_OS_TRUST_TEMPLATE,
+            console_issue=tls_paths.CONSOLE_ISSUE,
         )
 
     @property
@@ -295,6 +299,12 @@ class Authority:
         self._streak: Tuple[Any, int] = (None, 0)
         self._identity_reissues: collections.deque = collections.deque()
         self._os_trust_done = False
+        #: ((root, served certificate), text) the login screen was last written
+        #: with in this process, set only after a write succeeded. A pass whose
+        #: key matches and whose file still holds that text derives nothing;
+        #: anything else - a new root or certificate, a deleted or edited file,
+        #: an earlier failed write - is written again.
+        self._issue_written: Optional[Tuple[Tuple[str, str], bytes]] = None
         #: What the last created root left out of its constraints, and why.
         self.root_dropped: Tuple[str, ...] = ()
 
@@ -517,11 +527,14 @@ class Authority:
         return notice["reason"]
 
     def _refresh_trust_steps(self, report: TickReport) -> None:
-        """Keep the saved trust steps current (VD-133 1.5.5 #2, review F3).
+        """Keep the saved trust steps and the login screen current (VD-133 1.5.5 #2).
 
-        Rewritten when missing, or when the root or the served certificate is
-        not the one the file was written for - so a box updated from the
-        console, where the installer never ran, has them too.
+        The steps (review F3) are rewritten when missing, or when the root or
+        the served certificate is not the one the file was written for - so a
+        box updated from the console, where the installer never ran, has them
+        too. The login screen (owner, 2026-10-20) is written by the same pass
+        with the same address, once per start and whenever the root or the
+        served certificate changes.
         """
         try:
             root = tls_trust_commands.read_root((self.layout.public_root,))
@@ -535,7 +548,10 @@ class Authority:
         else:
             why = tls_trust_commands.saved_steps_current(
                 existing.decode("utf-8", "replace"), root, leaf)
-        if not why:
+        issue_for = (root.short_id, tls_trust_commands.leaf_short_id(leaf))
+        issue_due = (self._issue_written is None or self._issue_written[0] != issue_for
+                     or _read(self.layout.console_issue) != self._issue_written[1])
+        if not why and not issue_due:
             return
         # The certificate's own address, else the host name (it names no usable one).
         address = self._console_address(leaf) or "{}:{}".format(
@@ -544,11 +560,45 @@ class Authority:
             report.notes.append("the trust steps were not saved: no console address "
                                 "could be derived")
             return
-        text = tls_trust_commands.saved_steps_text(
-            root, address, leaf, "Vaelor's certificate authority, because " + why,
-            path=path, now=self._now())
-        self._write(path, text.encode("utf-8"), 0o644, service_group=True)
-        report.actions.append("saved the trust steps in {} ({})".format(path, why))
+        if why:
+            text = tls_trust_commands.saved_steps_text(
+                root, address, leaf, "Vaelor's certificate authority, because " + why,
+                path=path, now=self._now())
+            self._write(path, text.encode("utf-8"), 0o644, service_group=True)
+            report.actions.append("saved the trust steps in {} ({})".format(path, why))
+        if issue_due:
+            text = tls_trust_commands.console_issue_text(root, address, leaf).encode("utf-8")
+            if self._write_console_issue(text, report):
+                self._issue_written = (issue_for, text)
+
+    def _write_console_issue(self, data: bytes, report: TickReport) -> bool:
+        """The login screen snippet; True when the file now holds ``data``.
+
+        A failure is a note, never the pass's error, and the next pass tries
+        again. The folder is made only when missing - an existing one keeps its
+        owner's mode (the unit's ExecStartPre makes it inside the sandbox; the
+        installer's ``ensure`` runs outside it). agetty is asked to redraw a
+        prompt already on screen; where it cannot, the new text shows at the
+        next login prompt.
+        """
+        path = self.layout.console_issue
+        folder = os.path.dirname(path)
+        try:
+            if not os.path.isdir(folder):
+                os.makedirs(folder, 0o755)
+            changed = self._write(path, data, 0o644)
+        except OSError as error:
+            report.notes.append("the console login screen was not updated: {} on {}".format(
+                error.strerror or type(error).__name__, error.filename or path))
+            return False
+        if not changed:
+            return True
+        report.actions.append("showed the console address and fingerprint on the "
+                              "login screen ({})".format(path))
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            self._run(["agetty", "--reload"], capture_output=True,
+                      timeout=_COMMAND_TIMEOUT_SECONDS, check=False)
+        return True
 
     def _clear_notice(self) -> None:
         with contextlib.suppress(FileNotFoundError):

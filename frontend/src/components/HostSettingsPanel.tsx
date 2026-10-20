@@ -10,6 +10,7 @@ import {
   parsePoolSize,
   poolBytes,
   poolPill,
+  poolSavedForRestart,
   poolSize,
   readHostSettings,
   type HostSettings,
@@ -201,7 +202,12 @@ function PoolCard({
             ]}
           />
           {pool.restart_reason && (
-            <p className="cl-warn-text cl-setup__note" role="status">{pool.restart_reason}</p>
+            <p
+              className={`${poolSavedForRestart(pool) ? "cl-setup__note--info" : "cl-warn-text"} cl-setup__note`}
+              role="status"
+            >
+              {pool.restart_reason}
+            </p>
           )}
           {keepButton && <div className="cl-actions">{keepButton}</div>}
           {!pool.can_change && <p className="cl-meta">{pool.blocked_reason}</p>}

@@ -96,6 +96,16 @@ _BACK_TO_DEFAULT = (
     "machine restarts."
 )
 
+#: What a card says when a saved size differs from the running one: the size
+#: is the owner's (or the recommended one an install or a join saved), so it
+#: is information about the next restart, never a warning (VD-161 amended).
+SAVED_FOR_RESTART = "Saved {}; it counts from the next restart."
+#: A saved size SMALLER than the running pool: still chosen, but it shrinks.
+SAVED_SMALLER = (
+    "Saved {}; the next restart shrinks the pool to it from {}. A model sized for "
+    "the larger pool may no longer fit."
+)
+
 #: What any loose size is told, at every boundary that checks one.
 WHOLE_NUMBER_REQUIRED = "Choose the GPU memory pool size as a whole number of GiB."
 
@@ -463,9 +473,12 @@ def pool_status(facts: Any, gpu: Any, now: Callable[[], float] = time.time) -> D
     elif override["state"] == OVERRIDE_VAELOR:
         pending = override_bytes != current_bytes
         status["restart_pending"] = pending
+        # VD-161 amended (owner, 2026-10-20): information, not a warning.
         status["restart_reason"] = (
-            "The pool is set to {} and takes that size when this machine "
-            "restarts.".format(_gib_text(override_bytes)) if pending else ""
+            "" if not pending
+            else SAVED_SMALLER.format(_gib_text(override_bytes), _gib_text(current_bytes))
+            if override_bytes < current_bytes
+            else SAVED_FOR_RESTART.format(_gib_text(override_bytes))
         )
     elif override["state"] == OVERRIDE_ABSENT:
         status["restart_pending"] = not at_default
@@ -710,6 +723,54 @@ def require_revert(status: Dict[str, Any]) -> None:
             "{} could not be read on this machine, so Vaelor will not remove "
             "it. Check the file there first.".format(CONFIG_PATH)
         )
+
+
+# --- the size an install or a join saves (VD-161 amended, owner 2026-10-20) --
+
+def recommended_save(status: Any) -> Tuple[Optional[int], str]:
+    """``(size_gib, "")`` to save on this machine, or ``(None, why nothing is saved)``.
+
+    The ONE rule the controller's install and update step
+    (`gpu_memory_pool_apply` ``recommend``) and a worker's join
+    (`gpu_memory_pool_nodes.save_recommended_on_worker`) both apply, so the two
+    cannot decide differently (LESSONS 6). The size is the largest safe one,
+    ``max_gib`` - `achievable_gtt_ceiling` in whole GiB - and it goes through
+    :func:`require_size_gib` like any owner's choice. A size already saved,
+    the owner's own included, is never changed; another source of the setting
+    or a file nobody could read is never outvoted (``can_change``); a pool
+    already running above that size is left for the owner, because saving it
+    would shrink the pool at the next restart.
+    """
+    record = status if isinstance(status, dict) else {}
+    override = record.get("override") if isinstance(record.get("override"), dict) else {}
+    if record.get("supported") and override.get("state") == OVERRIDE_VAELOR:
+        return None, "A size is already saved ({}); it is kept as it is.".format(
+            _gib_text(override.get("bytes")))
+    if not record.get("supported") or not record.get("can_change"):
+        # An unsupported machine's reason; or why it cannot change here -
+        # another source (never outvoted), a file nobody could read, too
+        # little memory.
+        return None, "Nothing saved: {}".format(
+            record.get("reason") or record.get("blocked_reason") or "no GPU memory pool here.")
+    if override.get("state") != OVERRIDE_ABSENT:
+        return None, ("Nothing saved: {} was not written in Vaelor's form; it is kept as "
+                      "it is.".format(CONFIG_PATH))
+    largest = record.get("max_gib")
+    if type(largest) is not int or (record.get("current_bytes") or 0) > largest * GIB:
+        return None, (
+            "Nothing saved: this machine runs a {} pool, more than the largest safe size, "
+            "so saving that size would shrink it. Choose a size in {}.".format(
+                _gib_text(record.get("current_bytes")), SETTING_PLACE))
+    return largest, ""
+
+
+def recommended_saved_message(size_gib: int, status: Any) -> str:
+    """What an install or a join says after saving ``size_gib``: no restart note when none is due."""
+    if isinstance(status, dict) and status.get("restart_pending") is False:
+        return ("Saved {} GiB as the GPU memory pool size, the size this machine already "
+                "runs at.".format(size_gib))
+    return ("Saved {} GiB as the GPU memory pool size; it counts from the next restart, "
+            "which Vaelor never starts by itself.".format(size_gib))
 
 
 # --- the fit: would a bigger pool make this model fit ---------------------

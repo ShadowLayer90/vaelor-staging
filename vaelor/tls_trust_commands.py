@@ -444,6 +444,27 @@ def saved_steps_current(text: str, root: RootFacts, leaf: Any) -> str:
     return ""
 
 
+def console_issue_text(root: RootFacts, address: str, leaf: Any) -> str:
+    """The box's text login screen snippet (VD-133 1.5.5 #2, owner 2026-10-20).
+
+    The console address the trust steps name (:func:`console_address_for`, one
+    derivation) and the household authority's SHA-256, split over two lines
+    of sixteen pairs so it fits an 80-column console. agetty reads a backslash
+    as an escape (backslash-4 prints an address), so none survives into the file.
+    """
+    pairs = root.sha256.split(":")
+    lines = [
+        "Vaelor console: https://{}/v2/".format(address),
+        "Household authority SHA-256 fingerprint (compare it before trusting):",
+        "  " + ":".join(pairs[:16]),
+        "  " + ":".join(pairs[16:]),
+        "Trust steps: sudo cat " + SAVED_STEPS,
+    ]
+    if leaf is not None and classify(leaf, root.certificate, (socket.gethostname(),)) == KIND_CUSTOM:
+        lines.append("The console serves your own certificate; browsers follow that one.")
+    return "\n".join(line.replace("\\", "\\\\") for line in lines) + "\n\n"
+
+
 #: The command that prints the steps again on the controller. No --address:
 #: the address is derived from the certificate at the time it is run.
 REPRINT = "sudo /opt/vaelor/venv/bin/python -m vaelor.tls_trust_commands"

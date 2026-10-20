@@ -96,6 +96,18 @@ STEPS = (
     # (`release_snapshot`, VD-217).
     Step("release_snapshot", "refresh", 30,
          "refresh the release scripts Remove Vaelor runs (VD-217)"),
+    # VD-161 amended (owner, 2026-10-20): a machine with no saved GPU memory
+    # pool size gets the recommended one, on install AND update, so both paths
+    # end in the same state (VD-217). Seconds when a size is already saved;
+    # the first time, one boot-image rebuild (6.5 s measured on the Z2,
+    # 2026-10-20). Of its 300 s, 45 s is kept for clean-up (--within 255) and
+    # 10 s for itself, so its rebuilds share 245 s: the change gets all that
+    # is left, a roll-back the rest. Before the builds, which the first model
+    # start builds anyway if time runs out.
+    Step("gpu_memory_pool_apply", "recommend", 300,
+         "save the recommended GPU memory pool size when none is saved (VD-161)", True,
+         late=("not finished within {seconds} s, so it was stopped; whether the size was "
+               "saved is not known - see Cluster > Setup > Machine settings")),
     Step("vllm_overlay_build", "fetch", 150, "fetch the vLLM attention change (VD-215)"),
     Step("vllm_overlay_build", "build", 90, "build the patched attention file (VD-215)", True),
     Step("vllm_moe_hip_build", "build", 390, "build Vaelor's HIP expert kernels (VD-216)", True),

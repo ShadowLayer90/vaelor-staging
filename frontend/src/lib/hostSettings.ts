@@ -172,9 +172,24 @@ export function machineInSentence(name: string): string {
   return /^This controller\b/.test(name) ? "t" + name.slice(1) : name;
 }
 
+/**
+ * Whether the card's restart line is information, not a warning: a size is
+ * saved and the machine runs another one. VD-161 amended (owner, 2026-10-20):
+ * an install or a join saves the recommended size on a fresh machine, so this
+ * is the first thing its card says, and it is no error ("Saved 45 GiB; it
+ * counts from the next restart"). Only an unsaved pool warns.
+ */
+export function poolSavedForRestart(pool: PoolStatus): boolean {
+  return pool.supported && pool.restart_pending === true && pool.override?.state === "vaelor";
+}
+
 /** The pill for one machine's pool: what is true now, in one or two words. */
 export function poolPill(pool: PoolStatus): { tone: StatusTone; label: string } {
   if (!pool.supported) return { tone: "neutral", label: "Not available" };
+  if (poolSavedForRestart(pool)) {
+    // Still the owner's size, so information - but a smaller one says so.
+    return { tone: "info", label: pool.next_restart?.change === "shrink" ? "Smaller at restart" : "Counts at restart" };
+  }
   if (pool.restart_pending === true) {
     // VD-133 1.5.5 #3: "Restart needed" only when the restart moves the pool
     // to a size the owner chose; an unsaved pool says what a restart does.

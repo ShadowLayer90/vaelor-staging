@@ -1354,13 +1354,14 @@ install_wmi_sensors() {
 }
 install_wmi_sensors || true
 
-# The GPU memory pool (VD-161) is the owner's setting, chosen in the console
-# and applied only after they confirm it. The installer never creates,
-# changes or removes it: an install or a repair that silently resized the
-# memory a GPU may use would change what fits on the machine, and it takes a
-# restart nobody asked for to take effect. A file already here - written by
-# the console, or by hand before this setting existed - is kept exactly as it
-# is and shows up in the console as the current setting. The path is
+# The GPU memory pool (VD-161) is the owner's setting, chosen in the console.
+# This shell never writes it. A file already here - written by the console, or
+# by hand before this setting existed - is kept exactly as it is and shows up
+# in the console as the current setting. When none is saved, a post-install
+# step (the model refresh this script runs after its health gate) saves the recommended
+# size (VD-161 amended, owner 2026-10-20: `gpu_memory_pool_apply recommend`,
+# the console's own write, which the console update runs too). It never
+# restarts the machine, and its failure never fails the install. The path is
 # `gpu_memory_pool.CONFIG_PATH`, retyped because bash cannot import it;
 # tests/test_gpu_memory_pool_installer.py compares the two.
 report_gpu_memory_pool() {

@@ -85,6 +85,13 @@ units=(
 # compares the two. Overridable for the same ONE reason as the paths above.
 os_trust_dir="${VAELOR_OS_TRUST_DIR:-/usr/local/share/ca-certificates}"
 os_trust_glob="vaelor-household-*.crt"
+# The box's text login screen snippet the household authority writes - the
+# console address and the authority's fingerprint (tls_paths.CONSOLE_ISSUE,
+# VD-133 1.5.5 #2), retyped because bash cannot import it;
+# tests/test_uninstall_leftovers.py compares the two. Every uninstall removes
+# it: it names a console that is gone. Overridable for the same ONE reason as
+# the paths above.
+console_issue="${VAELOR_CONSOLE_ISSUE:-/etc/issue.d/vaelor.issue}"
 
 usage() {
   cat <<'EOF'
@@ -132,6 +139,9 @@ Every uninstall also removes the GPU memory pool setting Vaelor wrote
 (/etc/modprobe.d/vaelor-gpu-memory.conf) and rebuilds the boot image. The
 pool returns to the kernel's own size at the next restart, which this script
 does not perform.
+
+Every uninstall also removes the console address and fingerprint Vaelor shows
+on this machine's text login screen (/etc/issue.d/vaelor.issue).
 
 --purge-data deletes all of that, including the container images Vaelor pulled:
 the two gfx1151 serving images, the LLM Server's nginx, the multi-node vLLM
@@ -841,6 +851,7 @@ for item in items:
           "Finish with: update-initramfs -u - then restart this machine." >&2
       fi
     fi
+    rm -f "${console_issue}"
     rm -f \
       /etc/tmpfiles.d/vaelor.conf \
       /etc/udev/rules.d/99-vaelor-rpi-vcio.rules \

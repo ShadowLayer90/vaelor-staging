@@ -1,5 +1,27 @@
 # Change log
 
+## 1.5.5 Release Candidate 2
+
+The second staging build. It adds three changes the owner asked for after
+testing Release Candidate 1:
+
+- **Trusting this Vaelor is part of first-run setup.** Right after the first
+  administrator account is created, Vaelor shows how to trust its household
+  authority on the computer in use (with a QR code for phones) and the
+  fingerprint to compare. It can be skipped, and stays under Settings ›
+  Connections › Trust this Vaelor.
+- **The box's own text login screen shows the console address and the
+  authority's fingerprint**, so it can be checked away from the network.
+  Uninstalling removes it.
+- **A fresh machine no longer falls back to the kernel's smaller GPU memory
+  pool.** The installer and a worker's join save the largest safe size Vaelor
+  calculates when none is saved; a size you saved is never changed, and an
+  update never undoes your own Remove setting. The card says the saved size
+  counts from the next restart; Vaelor still never restarts a machine itself.
+
+Not yet verified on the hardware: the login screen redrawing an open prompt,
+and the first-run step on an iPad.
+
 ## 1.5.5 Release Candidate 1
 
 A release candidate, published only to the staging repository
