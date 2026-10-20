@@ -1,0 +1,51 @@
+/* Measured on the appliance 2026-08-10: a 1,178px `.acceleration-verdict` in
+   the old three-column setup-activity grid took the `auto` first column and
+   collapsed the summary to 0px. It spans the whole row of whatever grid it
+   sits in, so it can never claim one column of it. */
+.acceleration-verdict {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+@media (max-height: 520px) and (min-width: 681px) {
+  .sidebar__nav {
+    padding-block: var(--space-2);
+  }
+
+  .nav-item {
+    min-height: 38px;
+  }
+
+  .topbar {
+    min-height: 52px;
+  }
+
+  .main {
+    padding-top: var(--space-5);
+  }
+
+  .device-hero {
+    min-height: 250px;
+    margin-top: var(--space-4);
+  }
+
+  .device-hero__content {
+    padding-block: var(--space-3);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.agent-center {
+  display: grid;
+  gap: var(--space-5);
+}

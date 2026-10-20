@@ -1,0 +1,428 @@
+:root {
+  color-scheme: dark;
+  font-family: var(--font-family-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+
+  /* Foundations: this is the only supported token vocabulary. */
+  --font-family-sans:
+    Inter, "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-family-data:
+    "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  /* UX-A11, owner decision 2026-10-03: the compact desktop density stays
+     (81.25% root below), but no text is smaller than 12 px. At that root
+     these were 11.4 px and 10.6 px; floored here, on the tokens, so a raised
+     browser font still raises them and a phone (16 px root) is unchanged at
+     14 px and 13 px. Held by styles/typeFloor.test.ts and the contract's
+     type_floor clause. */
+  --font-size-body-sm: max(12px, 0.875rem);
+  --font-size-data-sm: max(12px, 0.8125rem);
+  --font-size-body: 1rem;
+  --font-size-body-lg: 1.125rem;
+  --font-size-heading-sm: 1.25rem;
+  /* h2 section titles: one tier below the page hero. Auto-shrinks at compact
+     density because its rem terms track the reduced root font-size. */
+  --font-size-section-title: clamp(1.35rem, 2vw, 1.8rem);
+  /* Shared .page-heading h1 / page-hero size. Base is the rem-equivalent of
+     the historic clamp(28px, 3vw, 36px); the compact override below holds the
+     historic clamp(22px, 2.2vw, 30px) so the hero renders identically. */
+  --font-size-heading-md: clamp(1.75rem, 3vw, 2.25rem);
+
+  /* Font weights. Existing raw weights map here: 600 -> medium; 650/700 ->
+     semibold; 720/740/750 -> bold; 900 -> black. (800 is left as-is.) */
+  --weight-medium: 600;
+  --weight-semibold: 700;
+  --weight-bold: 750;
+  --weight-black: 900;
+
+  --bg-canvas: #050505;
+  --bg-sidebar: #070707;
+  --bg-surface: #0b0b0b;
+  --bg-surface-raised: #101010;
+  --bg-hover: #151515;
+  --border-subtle: #1f1f1f;
+  --border-default: #2a2a2a;
+  --border-strong: #3a3a3a;
+  --text-primary: #f5f5f5;
+  --text-secondary: #b8b8b8;
+  --text-muted: #9a9a9a;
+  --accent: #ff6500;
+  --accent-hover: #ff7a1a;
+  --accent-deep: #401800;
+  --accent-soft: #1e0c00;
+  --accent-glow: rgb(255 101 0 / 18%);
+  --panel-highlight: var(--card-edge);
+  --success: #22c55e;
+  --success-soft: #04140a;
+  --info: #38bdf8;
+  --info-soft: #06141c;
+  --info-border: var(--info-line);
+  --warning: #f59e0b;
+  --warning-soft: #1a1204;
+  --danger: #ef4444;
+  /* A danger fill carries --text-on-danger at 4.5:1 or better, at rest and
+     under the pointer, so hover darkens. --danger-text is the outline colour
+     (pill, banner, outline button) and never lands on a fill (UX-A1: a menu's
+     .danger-text on a solid danger button read 3.97:1). Held by
+     src/styles/dangerTokenContrast.test.ts. */
+  --danger-strong: #b91c1c;
+  --danger-soft: #1a0606;
+  --danger-hover: #991b1b;
+  --success-border: #14532d;
+  --warning-border: #78350f;
+  --danger-border: #7f1d1d;
+  --success-text: #bbf7d0;
+  --danger-text: #fca5a5;
+  --text-on-danger: #ffffff;
+  /* A sparkline's area is the banner ground of its tone (VD-200 boards). */
+  --chart-success-fill: var(--success-soft);
+  --chart-warning-fill: var(--warning-soft);
+  --chart-danger-fill: var(--danger-soft);
+  /*
+   * Chart series (VD-163). Three node slots and no more: a fourth node is
+   * never given a generated hue, it goes through the chart's chooser. The
+   * hexes were run through the dataviz palette validator on --bg-surface
+   * (dark mode, all pairs, protan/deutan/tritan) and pass every check. Do not
+   * change one without re-running it. Status colours never mark a series.
+   */
+  --chart-series-1: #3987e5;
+  --chart-series-2: #d55181;
+  --chart-series-3: #8f9e2a;
+  --chart-series-aggregate: var(--text-secondary);
+  --chart-grid: var(--border-subtle);
+  --chart-axis-text: var(--text-muted);
+  /* 1.73:1 as --border-strong; --text-muted reaches 3:1 on --bg-surface. */
+  --chart-crosshair: var(--text-muted);
+  --chart-threshold: var(--text-muted);
+  --chart-event: var(--text-muted);
+  --focus: #7dd3fc;
+  --overlay: rgb(0 0 0 / 78%);
+
+  /*
+   * The redesign's surfaces (VD-200, the mockup's states sheet). A card is a
+   * near-black fill that darkens downward, a hairline border and one lit top
+   * edge; rows inside it are split by a fainter line. Nothing here glows.
+   */
+  --bg-card-top: #0e0e0e;
+  --bg-card: #0a0a0a;
+  --bg-control: #080808;
+  --border-card: #1f1f1f;
+  --border-row: #181818;
+  --card-edge: rgb(255 255 255 / 4%);
+  --surface-card: linear-gradient(180deg, var(--bg-card-top), var(--bg-card));
+  --shadow-card-edge: inset 0 1px 0 var(--card-edge);
+  --radius-pill: 999px;
+  /* The selected item of a segmented choice, on the accent's own ground. */
+  --accent-text: #ffb27a;
+  /*
+   * A status pill is a hairline outline, a word and a dot, and the word and the
+   * dot are one value: each tone sets the word's colour, the outline and the
+   * dot's halo together. Grey means "not read, old, paused or stopped" and says
+   * which in words; green means only "read just now and fine".
+   */
+  --success-halo: rgb(34 197 94 / 15%);
+  --warning-halo: rgb(245 158 11 / 15%);
+  --danger-halo: rgb(239 68 68 / 15%);
+  --info-halo: rgb(56 189 248 / 15%);
+  --warning-text: #fcd34d;
+  --info-text: #bae6fd;
+  --info-line: #0c4a6e;
+  --dot-off: #5a5a5a;
+  /* The dashed "not read" dot and the dashed outline of an old reading:
+     5.7:1 on --bg-card (held by stateTokenContrast.test.ts). */
+  --text-unread: #8a8a8a;
+  /* The section eyebrow grey of the redesign (Overview / AI / Manage, table
+     heads): 4.5:1 or better on --bg-sidebar, both ends of the card, and the
+     raised, icon and hover grounds it also lands on (#7b7b7b read 4.39:1 on
+     --bg-icon in the polish audit). */
+  --text-faint-label: #858585;
+  /* A field's outline (WCAG 1.4.11, 3:1 against the field and every surface a
+     field sits on; --border-default is 1.4:1), and the brighter outline under
+     the pointer, which stays 3:1 against the hovered fill. */
+  --border-field: #626262;
+  --border-field-hover: #767676;
+  --border-hairline: #161616;
+  --bg-row-active: #141414;
+  --border-row-active: #262626;
+  --bg-icon: #131313;
+  --border-icon: #222222;
+  --bg-spark: #2a2a2a;
+  /* The board's remaining surfaces (DESIGN_TOKENS.md): list rows split by a
+     fainter line than the card header's, the key/value grid's gaps and
+     cells, the sidebar's edge, the meter track, a button's own fill and the
+     dark text on the orange primary. */
+  --border-list: #151515;
+  --bg-row-hover: #101010;
+  --border-kv: #1a1a1a;
+  --bg-kv: #0b0b0b;
+  --border-sidebar: #1a1a1a;
+  --meter-track: #1a1a1a;
+  --bg-button: #0f0f0f;
+  --text-on-accent: #120700;
+  /* An inactive rail or health icon (VD-200, IconsHugeicons: 45% white, as
+     in the reference template); the current page's icon is --accent. */
+  --icon-muted: #737373;
+
+  /*
+   * The redesign's fixed type sizes (VD-200, the mockup boards). The shell and
+   * Home are drawn to the boards in pixels, so they do not shrink with the
+   * compact desktop root (81.25%) the other pages still use; none is under the
+   * 12 px floor (VD-191).
+   */
+  --font-size-ui-xs: 12px;
+  --font-size-ui-sm: 13px;
+  --font-size-ui: 14px;
+  --font-size-ui-lg: 15px;
+  --font-size-ui-xl: 16px;
+  --font-size-display: 30px;
+  --font-size-stat: 34px;
+  --font-size-stat-sm: 26px;
+  --space-page-end: 48px;
+
+  /*
+   * Stacking order. Before these existed, every overlay picked its own number
+   * (32, 90, 99, 100, 120, 200, 1000) and nesting order was decided by
+   * accident: the custom-agent test dialog opened from a modal at 120 while
+   * sitting at 90, so it rendered fully-formed and invisible underneath the
+   * modal that spawned it. A dialog opened from a dialog uses
+   * --layer-modal-nested so that ordering is stated rather than inferred.
+   */
+  --layer-raised: 32;
+  --layer-sticky: 100;
+  --layer-modal: 200;
+  --layer-modal-nested: 300;
+  --layer-toast: 1000;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 40px;
+  --space-8: 48px;
+  --space-10: 64px;
+
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 12px;
+  --radius-status: 2px;
+  /* One height for every field control, so a row of fields lines up whether or
+     not a field carries hint text. 44px is the touch-target floor and does not
+     shrink at compact density. */
+  --control-height: 44px;
+  /* A compact control - a segmented toggle, a filter chip - that sits in a
+     row of text rather than a form. It may be shorter than a field on a
+     desktop, never under 24px (WCAG 2.5.8), and on a phone or a touch screen it
+     is the full touch target (UX-A2: the Cluster Easy/Advanced toggle was
+     21px tall, its filter chips 29px). */
+  --control-height-compact: 32px;
+  /* The least a target may be that is not a control - a disclosure's summary,
+     a text link in a card header, a legend toggle: 24 px on a desktop (WCAG
+     2.5.8) and the full touch target on a phone or a touch screen (polish
+     audit cause 10). One token, so a screen rule that sizes its own target
+     cannot keep the desktop floor on a phone. */
+  --target-min: 24px;
+  /* One line height for field help text — hint, error, disabled reason,
+     counter — so a hint that wraps to two lines keeps the same rhythm as one
+     that fits on a single line. */
+  --line-height-hint: 1.4;
+  --sidebar-width: 252px;
+  --topbar-height: 64px;
+  /* The phone navigation bar's measured height, published on <html> by the
+     Sidebar (hooks/useMobileNavClearance.ts) when a raised text size gives the
+     bar a second row (W8-D2). Zero until measured: the stylesheet never lets
+     the page's clearance fall below one row (--mobile-nav-clearance). */
+  --mobile-nav-bar-height: 0px;
+  --page-max: 1320px;
+
+  /* Smallest size permitted for meaningful interface copy. */
+  --shadow-modal: 0 28px 100px rgb(0 0 0 / 65%);
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  background: var(--bg-canvas);
+  /* WCAG 2.4.11 (UX-A9): the topbar is sticky, so a control scrolled into view
+     by keyboard focus landed under it - Cluster > Deployments' filter chips
+     were focused where the topbar covered them. Every scroll-into-view stops
+     below the topbar instead. */
+  scroll-padding-top: calc(var(--topbar-height) + var(--space-4));
+}
+
+@media (max-width: 720px), (pointer: coarse) {
+  :root {
+    --control-height-compact: var(--control-height);
+    --target-min: var(--control-height);
+  }
+}
+
+/*
+ * Compact desktop density uses real layout values. Browser and CSS zoom stay
+ * at 100%, so viewport units, fixed shell geometry, hit targets, and rendered
+ * parent/child bounds all use the same coordinate system.
+ *
+ * A percentage, not 13px (#150): 81.25% of the browser default is exactly
+ * 13px at the ordinary 16px setting — pixel-identical density — but a person
+ * who raises their browser's default font size gets that raise honoured.
+ * A hard 13px overrode the one control such a person has, which excludes
+ * rather than inconveniences.
+ */
+@media (min-width: 1025px) {
+  :root {
+    font-size: 81.25%;
+    --space-1: 3px;
+    --space-2: 6px;
+    --space-3: 10px;
+    --space-4: 13px;
+    --space-5: 19px;
+    --space-6: 26px;
+    --space-7: 32px;
+    --space-8: 38px;
+    --space-10: 51px;
+    --sidebar-width: 232px;
+    --topbar-height: 64px;
+    --page-max: 1440px;
+    --font-size-heading-md: clamp(22px, 2.2vw, 30px);
+  }
+
+  body {
+    font-size: 1rem;
+  }
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  overflow-x: hidden;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+small {
+  font-size: var(--font-size-body-sm);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-secondary);
+  opacity: 1;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.skip-link {
+  position: fixed;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 1000;
+  padding: var(--space-3) var(--space-4);
+  color: var(--bg-canvas);
+  background: var(--text-primary);
+  border-radius: var(--radius-sm);
+  font-weight: var(--weight-semibold);
+  transform: translateY(-150%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+.loading-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: var(--space-4);
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.page-loading {
+  min-height: 240px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-family: var(--font-family-data);
+  font-size: var(--font-size-body-sm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.loading-mark {
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Authentication */
+
+.brand-glyph,
+.topbar__mark {
+  display: grid;
+  place-items: center;
+  color: var(--bg-canvas);
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-family-data);
+  font-weight: var(--weight-black);
+  letter-spacing: -0.08em;
+}
+
+/*
+ * The auth fields are the `Input` primitive (`AuthScreen` renders `<Input>`),
+ * so their geometry and focus ring come from `.ui-control` like every other
+ * field. The element re-skin that used to live here gave them a different
+ * height (50px vs 44), radius, and canvas background, and — worst — replaced
+ * the global cyan `:focus-visible` ring with `outline: 2px solid
+ * var(--accent-deep)` (~#401800), a near-invisible focus indicator on the black
+ * card. Dropping it lets the primitive's standard, visible focus ring apply.
+ */
+
+.form-error {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-body-sm);
+}
+
+.ui-button--wide {
+  width: 100%;
+  margin-top: var(--space-4);
+}

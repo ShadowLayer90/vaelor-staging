@@ -1,0 +1,44 @@
+.pagination {
+  align-items: center;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  gap: var(--space-3);
+  justify-content: flex-end;
+  margin-top: 14px;
+  padding-top: 14px;
+  width: 100%;
+  grid-column: 1 / -1;
+}
+
+.pagination > span {
+  align-items: baseline;
+  color: var(--text-muted);
+  display: flex;
+  font-size: var(--font-size-body-sm);
+  gap: var(--space-1);
+  margin-right: auto;
+}
+
+.pagination > span small {
+  color: var(--text-muted);
+  margin-left: var(--space-2);
+}
+
+/* #149: this block used to restyle every label and input in the credential
+   form, pre-dating the ui-field primitives the form now renders — overriding
+   the primitives' padding, background, and radius. The primitives own field
+   appearance; only the layout wrapper keeps a rule here. */
+
+@media (max-width: 720px) {
+  .page-heading,
+.panel-heading {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .page-heading > .status-pill,
+  .panel-heading > .status-pill {
+    align-self: flex-start;
+  }
+}

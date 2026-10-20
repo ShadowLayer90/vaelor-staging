@@ -1,0 +1,11 @@
+/* Native selects and check controls inside the work area keep their touch
+   targets. */
+.main select {
+  min-height: 44px;
+}
+
+.main input[type="checkbox"],
+.main input[type="radio"] {
+  min-width: 24px;
+  min-height: 24px;
+}

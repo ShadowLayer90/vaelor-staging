@@ -1,0 +1,79 @@
+.custom-agent-manager {
+  display: grid;
+  gap: var(--space-5);
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.custom-agent-manager > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-5);
+}
+
+.custom-agent-manager h2,
+.custom-agent-manager h3,
+.custom-agent-manager p { margin: 0; }
+
+.custom-agent-manager header p {
+  max-width: 760px;
+  margin-top: var(--space-2);
+  color: var(--text-secondary);
+}
+
+/*
+ * `.ui-button` carries `overflow-wrap: anywhere`, which is right for a label
+ * that can legitimately be long and wrong for "Close": in a `space-between`
+ * panel heading the button was squeezed until the word broke into "Clos e".
+ */
+.custom-agent-manager .panel-heading .ui-button {
+  min-width: max-content;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/*
+ * The run and automation dialogs render through ModalShell, which owns the
+ * backdrop, centring, sizing, and surface chrome. Only the inner content's
+ * padded grid stays here.
+ */
+
+@media (max-width: 1024px) {
+  .custom-agent-manager > header { align-items: stretch; flex-direction: column; }
+}
+
+/*
+ * A run in flight has to look different from one that has stopped. Alpha 12
+ * showed an approved run as a bare "ready" that never changed, so a run that
+ * was working looked identical to one that had died.
+ */
+
+@keyframes custom-agent-run-pulse {
+  0%, 100% { opacity: 100%; }
+  50% { opacity: 25%; }
+}
+
+/* Skill revision editor. Wrapped in ModalShell for the shared focus trap, so
+   it supplies its own padded chrome the way every other ModalShell dialog
+   does (the standard shell has no padding of its own). */
+.skill-editor > form {
+  padding: var(--space-6);
+}
+
+.skill-editor h2 {
+  margin: 0 0 var(--space-3);
+  font-size: 21px;
+}
+
+.skill-editor > form > p {
+  margin: 0 0 var(--space-4);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.skill-editor > form > .ui-field {
+  margin-bottom: var(--space-4);
+}

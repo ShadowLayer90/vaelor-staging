@@ -1,0 +1,46 @@
+.panel-heading h2 {
+  margin: 0;
+  font-size: var(--font-size-body-lg);
+  letter-spacing: -0.02em;
+}
+
+.panel-heading {
+  align-items: flex-start;
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.panel-heading > svg {
+  color: var(--text-muted);
+}
+
+/*
+ * The enclosure and power panels on the appliance's Home. Each row is a fact
+ * with its qualifier under it — "3210 RPM" over "Automatic curve, level 2" —
+ * because the number alone does not answer "is this about to get loud".
+ */
+
+.enclosure-panel__note {
+  margin: var(--space-3) 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-body-sm);
+}
+
+.enclosure-panel > .ui-button {
+  margin-top: var(--space-4);
+  justify-self: start;
+}
+
+/* W6-D1: the target in words, with the raw id one click away. */
+.audit-target summary {
+  cursor: pointer;
+}
+
+.audit-target code {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--font-size-body-sm);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

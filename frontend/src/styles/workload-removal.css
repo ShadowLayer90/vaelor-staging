@@ -1,0 +1,170 @@
+/*
+ * The dependency-aware removal (VD-200, the ManageRemoval board): drawn inside
+ * the area's AppsDialog. The page behind is fully hidden, as before the
+ * redesign. Colours are tokens only.
+ */
+.apps-dialog-backdrop:has(> .workload-removal) {
+  background: var(--bg-canvas);
+  backdrop-filter: none;
+}
+
+.workload-removal .apps-dialog__body { gap: 14px; }
+
+.workload-removal h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--font-size-ui-sm);
+  font-weight: 500;
+}
+
+.workload-removal__group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.workload-removal__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workload-removal__heading span {
+  color: var(--text-muted);
+  font-size: var(--font-size-ui-xs);
+}
+
+.workload-removal__dependencies {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.workload-removal__dependencies li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-row);
+  border-radius: 8px;
+}
+
+.workload-removal__dependencies li[data-blocking="true"] { border-color: var(--danger-border); }
+
+.workload-removal__dependencies strong,
+.workload-removal__dependencies small { display: block; }
+
+.workload-removal__dependencies strong {
+  color: var(--text-primary);
+  font-size: var(--font-size-ui-sm);
+  font-weight: 400;
+}
+
+.workload-removal__dependencies small {
+  color: var(--text-muted);
+  font-size: var(--font-size-ui-xs);
+}
+
+.workload-removal__clear {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border-row);
+  border-radius: 10px;
+}
+
+.workload-removal__form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.workload-removal fieldset {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  border: 0;
+}
+
+.workload-removal legend {
+  margin-bottom: 8px;
+  padding: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-sm);
+}
+
+.workload-removal__choice {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-row);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.workload-removal__choice:has(input:checked) { border-color: var(--accent-deep); }
+
+.workload-removal__choice:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.workload-removal__choice input {
+  margin-top: 2px;
+  accent-color: var(--accent);
+}
+
+.workload-removal__choice strong,
+.workload-removal__choice small { display: block; }
+
+.workload-removal__choice strong {
+  color: var(--text-primary);
+  font-size: var(--font-size-ui-sm);
+  font-weight: 400;
+}
+
+.workload-removal__choice small {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: var(--font-size-ui-xs);
+  line-height: 1.45;
+}
+
+.workload-removal__blocked,
+.workload-removal__warning {
+  margin: 0;
+  color: var(--warning-text);
+  font-size: var(--font-size-ui-xs);
+}
+
+.workload-removal__disclosures ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+  line-height: 1.6;
+}
+
+.workload-removal__confirmation code {
+  font-family: var(--font-family-data);
+  font-size: var(--font-size-ui-xs);
+}
+
+.workload-removal .apps-dialog__footer .ui-button {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: var(--font-size-ui-sm);
+}
+
+@media (max-width: 720px), (pointer: coarse) {
+  .workload-removal .apps-dialog__footer .ui-button { min-height: 44px; }
+}

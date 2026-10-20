@@ -1,0 +1,69 @@
+{
+    "version":  3,
+    "scope":  "frontend/src/styles.css and frontend/src/styles/*.css (tokens-auth.css is the token source)",
+    "policy":  "Hardcoded colors outside tokens fail unless an exact file/property/value tuple is explicitly approved as decorative with a reason. Spacing and typography are validated against supported scales; no count baselines are used.",
+    "runtimeTokens":  [
+                          "--preset-color",
+                          "--lighting-brightness",
+                          "--lighting-color",
+                          "--lighting-opacity",
+                          "--lighting-speed",
+                          "--curve-height"
+                      ],
+    "decorativeColorApprovals":  [
+                                     {
+                                         "file":  "src/styles/hardware-controls.css",
+                                         "property":  "background",
+                                         "value":  "#111",
+                                         "reason":  "Fixed hardware chassis shading in the device preview; it is decorative hardware geometry, not a semantic interface color."
+                                     },
+                                     {
+                                         "file":  "src/styles/hardware-controls.css",
+                                         "property":  "background-image",
+                                         "value":  "rgb(255 255 255 / 2%)",
+                                         "reason":  "Fixed glass, grid, or reflection texture in the hardware preview; it carries no interface meaning."
+                                     },
+                                     {
+                                         "file":  "src/styles/overview.css",
+                                         "property":  "background",
+                                         "value":  "rgb(5 5 5 / 76%)",
+                                         "reason":  "Hero image, caption, or panel drop shadow; decorative depth only, with no interface-state meaning."
+                                     },
+                                     {
+                                         "file":  "src/styles/overview.css",
+                                         "property":  "filter",
+                                         "value":  "rgb(0 0 0 / 72%)",
+                                         "reason":  "Hero image, caption, or panel drop shadow; decorative depth only, with no interface-state meaning."
+                                     },
+                                     {
+                                         "file":  "src/styles/overview.css",
+                                         "property":  "filter",
+                                         "value":  "rgba(0, 0, 0, 0.62)",
+                                         "reason":  "Hero image, caption, or panel drop shadow; decorative depth only, with no interface-state meaning."
+                                     },
+                                     {
+                                         "file":  "src/styles/shell.css",
+                                         "property":  "background",
+                                         "value":  "rgb(5 5 5 / 90%)",
+                                         "reason":  "Shell backdrop, sidebar, or topbar compositing/shadow; decorative depth only, with no interface-state meaning."
+                                     },
+                                     {
+                                         "file":  "src/styles/workload-removal.css",
+                                         "property":  "background",
+                                         "value":  "rgb(0 0 0 / 20%)",
+                                         "reason":  "Removal-dialog depth surface; decorative only, with no interface-state meaning."
+                                     },
+                                     {
+                                         "file":  "src/styles/workload-removal.css",
+                                         "property":  "background",
+                                         "value":  "rgb(0 0 0 / 15%)",
+                                         "reason":  "Removal-dialog depth surface; decorative only, with no interface-state meaning."
+                                     },
+                                     {
+                                         "file":  "src/styles/fleet.css",
+                                         "property":  "--category-app",
+                                         "value":  "#a98bff",
+                                         "reason":  "App-category accent hue for the Fleet tab; decorative category differentiation of apps from models (cyan --info), not success, warning, danger, or interaction state. Defined once and referenced through var(--category-app) everywhere else."
+                                     }
+                                 ]
+}

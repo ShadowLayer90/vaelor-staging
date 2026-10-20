@@ -1,0 +1,5 @@
+
+.memory-page {
+  display: grid;
+  gap: var(--space-5);
+}

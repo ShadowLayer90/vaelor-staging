@@ -1,0 +1,60 @@
+/* Work areas use a flatter instrument-panel language; pills remain for status only. */
+
+@media (max-width: 720px) {
+
+  .pagination {
+    flex-wrap: wrap;
+  }
+  .pagination > span {
+    flex-basis: 100%;
+  }
+}
+
+.agent-center small {
+  font-size: 14px;
+}
+
+.panel-heading > *,
+.page-heading > * {
+  min-width: 0;
+}
+
+/* Operational labels must remain legible on dense and high-DPI displays. */
+
+.field-error {
+  display: block;
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent);
+  border-radius: var(--radius-sm);
+}
+
+@media (max-width: 720px) {
+  .agent-center,
+  .agent-center > [role="tabpanel"],
+  .agent-center .memory-page {
+    min-width: 0;
+    max-width: calc(100vw - (var(--space-4) * 2));
+  }
+  .agent-center .memory-page > * {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+/* Shared card rhythm: 24px desktop, 16px compact, and 16px grid gutters. */
+:where(.managed-card, .memory-card, .skill-card, .agent-task-card) {
+  padding: var(--space-5);
+}
+
+:where(.managed-card-grid, .memory-list, .skill-list, .agent-task-list) {
+  gap: var(--space-4);
+}
+
+@media (max-width: 720px) {
+  :where(.managed-card, .memory-card, .skill-card, .agent-task-card) {
+    padding: var(--space-4);
+  }
+}

@@ -1,0 +1,952 @@
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { apiRequest, ApiError } from "../lib/api";
+import { modelDisplayName } from "../lib/modelIdentity";
+import type { Session } from "../types";
+import { AiChatComposer } from "./AiChatComposer";
+import { AiChatDetails } from "./AiChatDetails";
+import { effectiveModel, reopenedChatModel } from "./AiChatModelPicker";
+import { AiChatProposalCard } from "./AiChatProposalCard";
+import { AiChatRail } from "./AiChatRail";
+import { AiChatToolbar, type AgentsReading } from "./AiChatToolbar";
+import { AiChatThread, type AiChatRetrieval, type AiChatThreadMessage } from "./AiChatThread";
+import { DROPPED_CONNECTION_NOTICE, droppedConnectionSubject, useResumedAnswer } from "../hooks/useResumedAnswer";
+import type {
+  AiChatCollection,
+  AiChatConnection,
+  AiChatConversation,
+  AiChatDocument,
+  AiChatAgent,
+  AiChatAgentProposal,
+  AiChatSetup,
+} from "./aiChatTypes";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { TextPromptDialog } from "./TextPromptDialog";
+import { Button, Notice } from "./ui";
+import { answeredByLine, downloadConversationMarkdown } from "../lib/aiChatExport";
+import { prepareDocumentUpload } from "../lib/aiChatDocument";
+import { conversationIdFromHash, useAiChatRoute } from "../hooks/useAiChatRoute";
+import { useModalAction } from "../hooks/useModalAction";
+import { useAiChatThinking } from "../hooks/useAiChatThinking";
+import { useAiChatModelFailures } from "../hooks/useAiChatModelFailures";
+import { useAiChatWebSearch } from "../hooks/useAiChatWebSearch";
+import { bytesIn } from "../lib/format";
+import { agentRunSavedNotice, openAgentRun, saveAgentRun } from "../lib/aiChatAgentRun";
+
+type DeleteTarget = {
+  type: "conversation" | "collection";
+  id: string;
+  name: string;
+} | null;
+
+/*
+ * The browser must outlast the appliance, never the other way round. The
+ * server's own budget is VAELOR_INFERENCE_TIMEOUT_SECONDS (240 by default,
+ * 900 at most), so a client that gave up at 130 seconds reported a timeout
+ * for a request the appliance was still working on - and because the failure
+ * was invented in the browser, nothing was written to the conversation and
+ * the answer vanished on reload. This sits above the server's ceiling so the
+ * appliance always gets to state the outcome itself.
+ */
+const AI_CHAT_CLIENT_TIMEOUT_MS = 930_000;
+
+/* Moved to `AiChatModelPicker.tsx`; re-exported so callers keep their import. */
+export { blamedModel, modelOptionLabel } from "./AiChatModelPicker";
+/* Routing moved to `useAiChatRoute`; re-exported so callers keep their import. */
+export { conversationIdFromHash } from "../hooks/useAiChatRoute";
+
+export function AiChat({ session }: { session: Session }) {
+  const [setup, setSetup] = useState<AiChatSetup | null>(null);
+  const [models, setModels] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedCollections, setSelectedCollections] = useState<string[]>([]);
+  const [conversations, setConversations] = useState<AiChatConversation[]>([]);
+  const [conversationId, setConversationId] = useState(
+    () => conversationIdFromHash(window.location.hash),
+  );
+  const [openRecord, setOpenRecord] = useState<AiChatConversation | null>(null);
+  const [messages, setMessages] = useState<AiChatThreadMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [temporary, setTemporary] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const [activeCollection, setActiveCollection] = useState("");
+  const collectionOpened = useRef(false);
+  const [documents, setDocuments] = useState<AiChatDocument[]>([]);
+  const [collectionName, setCollectionName] = useState("");
+  const [collectionDescription, setCollectionDescription] = useState("");
+  const [busy, setBusy] = useState("");
+  const [notice, setNoticeText] = useState("");
+  const [noticeRefused, setNoticeRefused] = useState(false); // VD-189 N3: a refusal is an alert
+  const setNotice = useCallback((message: string, refused = false) => { setNoticeText(message); setNoticeRefused(refused); }, []);
+  const [renameTitle, setRenameTitle] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
+  const dialogAction = useModalAction(); // VD-189: the rename/delete refusal renders in its dialog, not on the inert page.
+  const [awaitingAnswer, setAwaitingAnswer] = useState(false);
+  const [agentProposal, setAgentProposal] = useState<AiChatAgentProposal | null>(null);
+  const [agentRunSubmitted, setAgentRunSubmitted] = useState(false);
+  const [agents, setAgents] = useState<AiChatAgent[]>([]);
+  /*
+   * Whether `/assistant/profiles` has answered, however it answered. An empty
+   * list before it does is not the same fact as an appliance with no agents,
+   * and the Agent select is not allowed to state the second while holding the
+   * first — the same rule the model picker's `reading` state exists for.
+   */
+  const [agentsResolved, setAgentsResolved] = useState(false);
+  const [agentsReading, setAgentsReading] = useState<AgentsReading>({ failed: false, inactive: 0 });
+  const [selectedAgentId, setSelectedAgentId] = useState("");
+  const { modelFailures, reportFailure, clearModelFailure } = useAiChatModelFailures();
+  /*
+   * Which thread the user is looking at right now. A reply belongs to the
+   * conversation it was sent from: switching threads mid-request used to
+   * append the in-flight answer to whatever was on screen when it landed, so
+   * an answer appeared under a question that was never asked there. The
+   * counter changes on every switch, and a reply whose ticket no longer
+   * matches is dropped rather than shown in the wrong place.
+   */
+  const threadTicket = useRef(0);
+  /*
+   * The same ticket, in state, so the view can be rendered against it. The
+   * "Generating with …" indicator was drawn from `busy` and the model picker -
+   * both properties of whoever is looking - so a reply in flight in one chat
+   * announced itself in whichever chat was opened next, under whichever model
+   * name the picker had moved on to.
+   */
+  const [viewTicket, setViewTicket] = useState(0);
+  const [pending, setPending] = useState<{ ticket: number; model: string } | null>(null);
+  const thinking = useAiChatThinking(session.csrf_token, setup?.active_connection?.id ?? "", effectiveModel(models, selectedModel)); // VD-209
+  const openThread = useCallback(() => {
+    threadTicket.current += 1;
+    setViewTicket(threadTicket.current);
+    return threadTicket.current;
+  }, []);
+  const abortSend = useRef<AbortController | null>(null);
+  const stoppedByUser = useRef(false);
+
+  const loadConversations = useCallback(async () => {
+    const params = new URLSearchParams();
+    if (showArchived) params.set("archived", "1");
+    if (search.trim()) params.set("q", search.trim());
+    const suffix = params.toString() ? `?${params}` : "";
+    setConversations(await apiRequest<AiChatConversation[]>(`/ai-chat/conversations${suffix}`));
+  }, [search, showArchived]);
+
+  const loadSetup = useCallback(async (preserveSelection = false) => {
+    const next = await apiRequest<AiChatSetup>("/ai-chat/setup");
+    setSetup(next);
+    if (!preserveSelection) {
+      setSelectedModel(next.preference.model);
+      setSelectedCollections(next.preference.collection_ids);
+    }
+    // Only the first read opens a collection: "" after that is the reader's collapse, not "unset" (VD-200).
+    if (next.collections.length && !collectionOpened.current) { collectionOpened.current = true; setActiveCollection((current) => current || next.collections[0].id); }
+    if (next.active_connection) {
+      const result = await apiRequest<{ models: string[] }>(
+        `/ai-chat/connections/${next.active_connection.id}/models`,
+      );
+      const available = result.models ?? [];
+      setModels(available);
+      /*
+       * Reconcile the remembered model against what this connection now offers.
+       * The preference is a bare string saved from before; a model named there
+       * when a different local server answered AI Chat ("gpt-oss-sg:20b") is a
+       * phantom once a GPU server offering only Qwen is dedicated to the chat.
+       * Sending against it draws a rejection, and the caption named a model the
+       * dropdown could not even select. When the stored model is absent (or
+       * unset), fall back to what the server reports active, else the first
+       * available — the same model the picker now shows.
+       */
+      if (!preserveSelection && available.length && !available.includes(next.preference.model)) {
+        const active = next.active_connection.selected_model ?? "";
+        setSelectedModel(available.includes(active) ? active : available[0]);
+      }
+    } else {
+      setModels([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSetup().catch((error) => {
+      setNotice(error instanceof Error ? error.message : "AI Chat could not be loaded.", true);
+    });
+    // W4d-D17: the Assistant's agents are the ones AI Chat can propose
+    // (custom_profiles; the route defaults to that surface); an inactive one
+    // is counted, a failed read is said.
+    void apiRequest<AiChatAgent[]>("/assistant/profiles")
+      .then((items) => {
+        const customs = items.filter((item) => item.custom);
+        const active = customs.filter((item) => item.enabled !== false);
+        setAgents(active);
+        setAgentsReading({ failed: false, inactive: customs.length - active.length });
+      })
+      .catch(() => { setAgents([]); setAgentsReading({ failed: true, inactive: 0 }); })
+      .finally(() => setAgentsResolved(true));
+  }, [loadSetup]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadConversations().catch((error) => {
+        setNotice(error instanceof Error ? error.message : "Chat history could not be loaded.", true);
+      });
+    }, search ? 250 : 0);
+    return () => window.clearTimeout(timer);
+  }, [loadConversations, search]);
+
+  useEffect(() => {
+    if (!activeCollection) {
+      setDocuments([]);
+      return;
+    }
+    void apiRequest<AiChatDocument[]>(`/ai-chat/collections/${activeCollection}/documents`)
+      .then(setDocuments)
+      .catch(() => setDocuments([]));
+  }, [activeCollection]);
+
+  useEffect(() => {
+    if (!focusMode) return;
+    const leaveFocus = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFocusMode(false);
+    };
+    document.addEventListener("keydown", leaveFocus);
+    return () => document.removeEventListener("keydown", leaveFocus);
+  }, [focusMode]);
+
+  const saveContext = async (model: string, collections: string[]) => {
+    await apiRequest(
+      "/ai-chat/preferences",
+      { method: "PATCH", body: JSON.stringify({ model, collection_ids: collections }) },
+      session.csrf_token,
+    );
+    // Collections only: a chat names the model that answered in it (ACC-116).
+    if (conversationId && !temporary) {
+      await apiRequest(
+        `/ai-chat/conversations/${conversationId}`,
+        { method: "PATCH", body: JSON.stringify({ collections }) },
+        session.csrf_token,
+      );
+    }
+  };
+
+  const activateConnection = async (connection: AiChatConnection) => {
+    setBusy("connection"); setNotice("");
+    try {
+      await apiRequest(
+        `/ai-chat/connections/${connection.id}/activate`,
+        { method: "POST", body: "{}" },
+        session.csrf_token,
+      );
+      setNotice(`${connection.label} is now dedicated to AI Chat.`);
+      await loadSetup();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Connection could not be activated.", true);
+    } finally { setBusy(""); }
+  };
+
+  const chooseModel = async (model: string) => {
+    setSelectedModel(model);
+    try {
+      await saveContext(model, selectedCollections);
+      // The name the reader picked, not the file the server loads it from.
+      setNotice(`This chat will use ${modelDisplayName(model)}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Model choice could not be saved.", true);
+    }
+  };
+
+  const toggleCollection = async (id: string) => {
+    const next = selectedCollections.includes(id)
+      ? selectedCollections.filter((item) => item !== id)
+      : [...selectedCollections, id];
+    setSelectedCollections(next);
+    try {
+      await saveContext(selectedModel, next);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Knowledge choice could not be saved.", true);
+    }
+  };
+
+  const openConversation = async (item: AiChatConversation) => {
+    openThread();
+    setTemporary(false);
+    setConversationId(item.id);
+    setOpenRecord(item);
+    setSelectedModel((current) => reopenedChatModel(item.model, current, models));
+    /*
+     * Resuming a chat must never silently switch retrieval off. A conversation
+     * started before any collection existed carries an empty list; adopting it
+     * cleared the live selection, and the next request wrote that empty list
+     * back over the conversation, so the chat could never search again and the
+     * only clue was "General model knowledge" in small text. An empty stored
+     * selection now falls back to the account preference instead.
+     */
+    const stored = item.collections ?? [];
+    const preferred = setup?.preference.collection_ids ?? [];
+    setSelectedCollections(
+      stored.length ? stored : preferred.length ? preferred : selectedCollections,
+    );
+    const nextMessages = await apiRequest<AiChatThreadMessage[]>(
+      `/ai-chat/conversations/${item.id}/messages`,
+    );
+    setMessages(nextMessages);
+    /*
+     * A stored transcript that ends on a question is a question the appliance
+     * is still answering: it writes the turn before inference returns, so a
+     * reload mid-answer restored the question with nothing after it and nothing
+     * to say a reply was coming.
+     */
+    setAwaitingAnswer(nextMessages.at(-1)?.role === "user");
+    const savedProposal = [...nextMessages].reverse().find(
+      (message) => message.metadata?.proposed_agent_task,
+    )?.metadata?.proposed_agent_task ?? null;
+    setAgentProposal(savedProposal);
+    setSelectedAgentId(savedProposal?.profile_id ?? "");
+    setAgentRunSubmitted(false);
+  };
+
+  /*
+   * Keep saying so until the answer lands. The appliance finishes the reply
+   * server-side after a reload, and re-reading the conversation is the only
+   * way this browser learns that; without it the reader re-asks.
+   */
+  const resumed = useResumedAnswer({
+    armed: awaitingAnswer && Boolean(conversationId) && !temporary && busy !== "chat",
+    subject: conversationId,
+    poll: async () => {
+      const ticket = threadTicket.current;
+      const next = await apiRequest<AiChatThreadMessage[]>(
+        `/ai-chat/conversations/${conversationId}/messages`,
+      );
+      if (ticket !== threadTicket.current) return true;
+      if (next.at(-1)?.role !== "assistant") return false;
+      setMessages(next);
+      setAwaitingAnswer(false);
+      return true;
+    },
+  });
+
+  const newConversation = (isTemporary = false) => {
+    openThread();
+    setTemporary(isTemporary);
+    setConversationId("");
+    setOpenRecord(null);
+    setAwaitingAnswer(false);
+    setMessages([]);
+    setInput("");
+    setAgentProposal(null);
+    setAgentRunSubmitted(false);
+    setSelectedAgentId("");
+    setNotice(isTemporary ? "Temporary chat ready. Nothing in this chat will be saved." : "");
+  };
+
+  // The address bar and the open conversation are kept in step here: the URL
+  // names the open chat so a reload or shared link returns to it, a URL that
+  // already names one reopens it, and a nav click or Back/Forward is honoured
+  // rather than silently dropping the conversation (#164).
+  useAiChatRoute({
+    conversationId,
+    conversations,
+    hasMessages: messages.length > 0,
+    onNotice: setNotice,
+    openConversation,
+    // A dead id is never kept under "New chat" for a send to fail on (ACC-108).
+    onMissing: () => {
+      newConversation();
+      setNotice("That chat no longer exists, or it belongs to another account. This is a new chat.");
+    },
+    onArchived: () => setShowArchived(true),
+    temporary,
+  });
+
+  /*
+   * Archiving and restoring both empty the screen, so both have to say what
+   * they did with it. They used to drop the reader into a blank "New chat"
+   * with no message at all: the transcript they were reading vanished and
+   * nothing said where it had gone or how to get it back.
+   */
+  const archiveConversation = async () => {
+    if (!conversationId) return;
+    const name = conversations.find((item) => item.id === conversationId)?.title
+      ?? openRecord?.title ?? "That chat";
+    const restoring = showArchived;
+    await apiRequest(
+      `/ai-chat/conversations/${conversationId}`,
+      { method: "PATCH", body: JSON.stringify({ archived: !restoring }) },
+      session.csrf_token,
+    );
+    newConversation();
+    await loadConversations();
+    setNotice(
+      restoring
+        ? `${name} restored. It is back in your chat list, and this is a new chat.`
+        : `${name} archived. Open "Archive" in the chat list to read or restore it. This is a new chat.`,
+    );
+  };
+
+  const renameConversation = async () => {
+    if (!conversationId || !renameTitle?.trim()) return;
+    setBusy("rename");
+    try {
+      if (!(await dialogAction.run(() => apiRequest(
+        `/ai-chat/conversations/${conversationId}`,
+        { method: "PATCH", body: JSON.stringify({ title: renameTitle.trim() }) },
+        session.csrf_token,
+      )))) return;
+      setRenameTitle(null);
+      await loadConversations();
+    } finally { setBusy(""); }
+  };
+
+  const exportConversation = async () => {
+    const conversation = conversations.find((item) => item.id === conversationId)
+      ?? (openRecord?.id === conversationId ? openRecord : undefined);
+    if (!conversation) return;
+    // Every turn, not the newest hundred the thread holds (ACC-112).
+    try {
+      const exported = await apiRequest<{
+        messages: AiChatThreadMessage[]; total: number; limit: number; truncated: boolean;
+      }>(`/ai-chat/conversations/${conversation.id}/export`);
+      downloadConversationMarkdown(conversation, exported.messages, exported);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The chat could not be exported.", true);
+    }
+  };
+
+  const forkConversation = async (message: AiChatThreadMessage) => {
+    if (!conversationId || !message.id) return;
+    setBusy("chat");
+    try {
+      const branch = await apiRequest<AiChatConversation>(
+        `/ai-chat/conversations/${conversationId}/fork`,
+        { method: "POST", body: JSON.stringify({ through_message_id: message.id }) },
+        session.csrf_token,
+      );
+      await loadConversations();
+      await openConversation(branch);
+      setNotice("Branch created. The original chat is unchanged.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The branch could not be created.", true);
+    } finally { setBusy(""); }
+  };
+
+  const regenerate = async (message: AiChatThreadMessage, content?: string) => {
+    if (!conversationId || !message.id) return;
+    const ticket = threadTicket.current;
+    const requestModel = effectiveModel(models, selectedModel);
+    setBusy("chat"); setNotice("");
+    setPending({ ticket, model: requestModel });
+    try {
+      const result = await apiRequest<{
+        messages: AiChatThreadMessage[]; model: string; provider: string;
+        retrieval?: AiChatRetrieval;
+      }>(
+        `/ai-chat/conversations/${conversationId}/regenerate`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            message_id: message.id,
+            content,
+            model: requestModel,
+            thinking: thinking.step || undefined,
+            web_search: webSearch.on, // VD-221: only the owner's toggle searches
+          }),
+          timeoutMs: AI_CHAT_CLIENT_TIMEOUT_MS,
+        },
+        session.csrf_token,
+      );
+      setMessages(result.messages);
+      clearModelFailure(result.model || requestModel);
+      setNotice(answeredByLine(result.provider, result.model));
+      await loadConversations();
+    } catch (error) {
+      const failure = error instanceof Error
+        ? error.message
+        : "The answer could not be regenerated.";
+      setNotice(reportFailure(error, requestModel, failure));
+      /*
+       * Re-asking a stored question is a send by another route, so it ends the
+       * same way a send does: the question comes back to the composer. It used
+       * to leave nothing but a banner, so a first failure and a failed retry of
+       * the same question put the words in two different places.
+       */
+      if (message.role === "user") setInput((current) => current || (content ?? message.content));
+    } finally {
+      setBusy("");
+      setPending(null);
+    }
+  };
+
+  const createCollection = async (event: FormEvent) => {
+    event.preventDefault(); setBusy("collection"); setNotice("");
+    try {
+      const created = await apiRequest<AiChatCollection>(
+        "/ai-chat/collections",
+        { method: "POST", body: JSON.stringify({ name: collectionName, description: collectionDescription }) },
+        session.csrf_token,
+      );
+      setCollectionName(""); setCollectionDescription(""); setActiveCollection(created.id);
+      const next = [...new Set([...selectedCollections, created.id])];
+      setSelectedCollections(next);
+      await saveContext(selectedModel, next);
+      await loadSetup(true);
+      setNotice("Knowledge collection created and enabled.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Collection could not be created.", true);
+    } finally { setBusy(""); }
+  };
+
+  /*
+   * Attaching a file has to work on a box that has never had one. Before this,
+   * a first-time user pressing "+" was sent to a panel whose only create form
+   * sat behind a collapsed disclosure, with no upload control rendered at all
+   * because nothing was selected yet - so the button read as dead, and there
+   * was no reachable way to give the assistant a document to read.
+   */
+  const ensureCollection = async () => {
+    if (activeCollection) {
+      // A file is only searched if its collection is in `selectedCollections`,
+      // and a preset activeCollection (loadSetup picks collections[0]) is not
+      // selected by default — so an attached document went unsearched and the
+      // model reported it saw none. Select it on attach, as the create branch does.
+      if (!selectedCollections.includes(activeCollection)) {
+        const next = [...new Set([...selectedCollections, activeCollection])];
+        setSelectedCollections(next);
+        await saveContext(selectedModel, next);
+      }
+      return activeCollection;
+    }
+    const created = await apiRequest<AiChatCollection>(
+      "/ai-chat/collections",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          name: "My documents",
+          description: "Files you add so Vaelor AI can answer from them.",
+        }),
+      },
+      session.csrf_token,
+    );
+    setActiveCollection(created.id);
+    const next = [...new Set([...selectedCollections, created.id])];
+    setSelectedCollections(next);
+    await saveContext(selectedModel, next);
+    return created.id;
+  };
+
+  const ingestFile = async (file: File) => {
+    setBusy("document"); setNotice("");
+    try {
+      const body = await prepareDocumentUpload(
+        file, setup?.limits.document_bytes ?? bytesIn(10, "MiB"));
+      const collectionId = await ensureCollection();
+      await apiRequest(
+        `/ai-chat/collections/${collectionId}/documents`,
+        { method: "POST", body: JSON.stringify(body), timeoutMs: 60000 },
+        session.csrf_token,
+      );
+      setDocuments(await apiRequest<AiChatDocument[]>(
+        `/ai-chat/collections/${collectionId}/documents`,
+      ));
+      await loadSetup(true);
+      /*
+       * Name the collection the file landed in. "+" adds to whichever
+       * collection happens to be selected, which on a shared appliance is
+       * whichever one the last person left selected - so a file could join
+       * somebody else's collection with nothing on screen naming it.
+       */
+      const destination = setup?.collections.find((item) => item.id === collectionId)?.name
+        ?? "My documents";
+      setNotice(`${file.name} added to ${destination}. Vaelor can now cite it in answers.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Document could not be indexed.", true);
+    } finally { setBusy(""); }
+  };
+
+  const removeDocument = async (id: string) => {
+    setBusy("document");
+    try {
+      await apiRequest(`/ai-chat/documents/${id}`, { method: "DELETE" }, session.csrf_token);
+      setDocuments((current) => current.filter((item) => item.id !== id));
+      await loadSetup(true);
+      setNotice("Document deleted.");
+    } finally { setBusy(""); }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setBusy("delete");
+    try {
+      const path = deleteTarget.type === "conversation"
+        ? `/ai-chat/conversations/${deleteTarget.id}`
+        : `/ai-chat/collections/${deleteTarget.id}`;
+      if (!(await dialogAction.run(() => apiRequest(path, { method: "DELETE" }, session.csrf_token)))) return;
+      if (deleteTarget.type === "conversation") newConversation();
+      if (deleteTarget.type === "collection") {
+        setSelectedCollections((current) => current.filter((id) => id !== deleteTarget.id));
+        setActiveCollection(""); setDocuments([]);
+      }
+      setDeleteTarget(null);
+      await Promise.all([loadConversations(), loadSetup(true)]);
+      setNotice(`${deleteTarget.name} deleted.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The item could not be deleted.", true);
+    } finally { setBusy(""); }
+  };
+
+  const reviewAgentRun = async () => {
+    if (!agentProposal || agentRunSubmitted) return;
+    setBusy("agent-run");
+    setNotice("");
+    try {
+      await saveAgentRun(agentProposal, session.csrf_token);
+      setAgentRunSubmitted(true);
+      setNotice(agentRunSavedNotice(session.user.role));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The agent run could not be prepared.", true);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const stopGeneration = useCallback(() => {
+    stoppedByUser.current = true;
+    abortSend.current?.abort();
+  }, []);
+
+  /**
+   * Ask a question and place its answer after `priorMessages`.
+   *
+   * Retry re-enters here with the turns from before the question that failed,
+   * so a second attempt replaces the failed exchange instead of stacking a
+   * duplicate of the question under it.
+   */
+  const submitQuestion = async (question: string, priorMessages: AiChatThreadMessage[]) => {
+    const ticket = threadTicket.current;
+    // The model the picker SHOWS (ACC-095): it reconciles via `effectiveModel`.
+    const requestModel = effectiveModel(models, selectedModel);
+    const controller = new AbortController();
+    abortSend.current = controller;
+    stoppedByUser.current = false;
+    setBusy("chat"); setNotice("");
+    setAwaitingAnswer(false); setPending({ ticket, model: requestModel });
+    setMessages([...priorMessages, { role: "user", content: question }]);
+    try {
+      const result = await apiRequest<{
+        conversation_id: string;
+        message: AiChatThreadMessage;
+        model: string;
+        provider: string;
+        retrieval?: AiChatRetrieval;
+        proposed_agent_task?: AiChatAgentProposal;
+        approval_required?: boolean;
+      }>(
+        "/ai-chat/messages",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            message: question,
+            conversation_id: temporary ? undefined : conversationId || undefined,
+            model: requestModel,
+            collection_ids: selectedCollections,
+            temporary,
+            history: temporary ? priorMessages : undefined,
+            agent_id: selectedAgentId || undefined,
+            thinking: thinking.step || undefined,
+            web_search: webSearch.on, // VD-221: only the owner's toggle searches
+            idempotency_key: globalThis.crypto?.randomUUID?.() ?? `ai-chat-${Date.now()}`, // VD-112: one key per send, reused by the api.ts transport retry so the appliance dedupes the turn.
+          }),
+          timeoutMs: AI_CHAT_CLIENT_TIMEOUT_MS,
+          signal: controller.signal,
+        },
+        session.csrf_token,
+      );
+      if (ticket !== threadTicket.current) {
+        setNotice("That answer finished after you moved to another chat. It was saved where you asked it.");
+        await loadConversations();
+        return;
+      }
+      setConversationId(result.conversation_id);
+      // It answered, so whatever it did last time is no longer true of it.
+      clearModelFailure(result.model || requestModel);
+      setMessages((current) => [
+        ...current,
+        { ...result.message, retrieval: result.message.retrieval ?? result.retrieval },
+      ]);
+      if (result.proposed_agent_task) {
+        setAgentProposal(result.proposed_agent_task);
+        setAgentRunSubmitted(false);
+      } else {
+        setAgentProposal(null);
+        setAgentRunSubmitted(false);
+      }
+      setNotice(
+        result.proposed_agent_task
+          ? "Agent proposal ready. Nothing has run."
+          : answeredByLine(result.provider, result.model, temporary),
+      );
+      if (!temporary) await loadConversations();
+    } catch (error) {
+      if (stoppedByUser.current) {
+        stoppedByUser.current = false;
+        if (ticket === threadTicket.current) {
+          setMessages([...priorMessages, { role: "user", content: question }]);
+          setNotice(
+            "Stopped waiting. The appliance may still finish this answer — reopen this chat to check.",
+          );
+        }
+        if (!temporary) await loadConversations();
+        return;
+      }
+      if (ticket !== threadTicket.current) return;
+      // The connection dropped mid-answer — the fault a reload used to be the
+      // only cure for. The appliance finishes server-side, so arm the resume-poll
+      // to surface the reply live (see `droppedConnectionSubject`). The question
+      // stays put and the poll replaces it with the server's turns, so it is not
+      // returned to the composer — re-asking is the duplicate that avoids.
+      const droppedSubject = await droppedConnectionSubject(error, temporary, conversationId, async () => {
+        const saved = await apiRequest<AiChatConversation[]>("/ai-chat/conversations");
+        return ticket === threadTicket.current ? saved[0]?.id ?? "" : conversationId;
+      });
+      if (droppedSubject) {
+        setConversationId(droppedSubject);
+        setMessages([...priorMessages, { role: "user", content: question }]);
+        setAwaitingAnswer(true);
+        setNotice(DROPPED_CONNECTION_NOTICE);
+        await loadConversations();
+        return;
+      }
+      const failure = error instanceof ApiError && error.code === "request_timeout"
+          ? "Vaelor stopped waiting before the appliance returned a model result. The model may still be loading or may be too large for its server. Confirm it is loaded, retry once, or choose a smaller model."
+          : error instanceof Error ? error.message : "AI Chat could not answer.";
+      const errorDetails = error instanceof ApiError ? error.details : {};
+      const persistedConversationId = typeof errorDetails.conversation_id === "string"
+        ? errorDetails.conversation_id
+        : "";
+      const persistedRecord = errorDetails.message_record;
+      const failureMessage: AiChatThreadMessage = (
+        persistedRecord
+        && typeof persistedRecord === "object"
+        && "role" in persistedRecord
+        && persistedRecord.role === "assistant"
+        && "content" in persistedRecord
+        && typeof persistedRecord.content === "string"
+      ) ? persistedRecord as AiChatThreadMessage : {
+        role: "assistant",
+        content: `This request failed: ${failure}`,
+      };
+      setMessages([
+        ...priorMessages,
+        { role: "user", content: question },
+        { ...failureMessage, failed: true },
+      ]);
+      if (!temporary) {
+        if (persistedConversationId) setConversationId(persistedConversationId);
+        await loadConversations();
+      }
+      setNotice(reportFailure(error, requestModel, failure));
+      /*
+       * Losing the question as well as the answer is two losses for one
+       * failure. The Assistant already hands it back; AI Chat emptied the
+       * composer on submit and never refilled it, so recovering meant retyping
+       * from memory. An answer the reader has since started typing wins.
+       */
+      setInput((current) => current || question);
+    } finally {
+      setBusy("");
+      setPending(null);
+    }
+  };
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault();
+    const question = input.trim();
+    if (!question) return;
+    setInput("");
+    await submitQuestion(question, messages);
+  };
+
+  /**
+   * Ask the unanswered question again.
+   *
+   * A turn the server stored can be regenerated against its own id. A turn
+   * left behind by Stop or by a failed first send was never written, so there
+   * is nothing to regenerate and the repair is to send it once more, from the
+   * conversation as it stood before it.
+   */
+  const retryAnswer = async (message: AiChatThreadMessage) => {
+    // Take back only the copy the failure handler put in the composer. Text the
+    // reader has since changed is theirs and stays where they left it.
+    setInput((current) => (current === message.content ? "" : current));
+    if (message.id && conversationId && !temporary) {
+      await regenerate(message);
+      return;
+    }
+    const index = messages.indexOf(message);
+    await submitQuestion(message.content, index < 0 ? messages : messages.slice(0, index));
+  };
+
+  // A stable handler: a fresh closure re-ran the dialog's select-all effect on
+  // every keystroke, so typing "Cupboard box notes" saved as "s".
+  const closeRename = useCallback(() => { dialogAction.clear(); setRenameTitle(null); }, [dialogAction.clear]);
+
+  /*
+   * Searching filters the conversation list, and the header read its title
+   * out of that filtered list - so typing in Search chats renamed the open
+   * conversation to "New chat" while its transcript was still on screen. The
+   * open conversation is remembered independently of whatever the list is
+   * currently showing.
+   */
+  const current = conversations.find((item) => item.id === conversationId)
+    ?? (openRecord?.id === conversationId ? openRecord : undefined);
+  // The composer uses a non-empty prop only to enable explicit agent routing;
+  // ordinary chat still sends the empty selected model and receives its normal error.
+  const composerModel = selectedModel || selectedAgentId || "agent-delegation";
+  const noticeIsError = noticeRefused || /could not|did not|failed|too long|exceeded|stopped waiting|rejected|lost the connection|error|unavailable/i.test(notice);
+  const administrator = session.user.role === "administrator";
+  // VD-221: the Web search toggle, remembered per conversation.
+  const webSearch = useAiChatWebSearch({
+    csrfToken: session.csrf_token,
+    conversationId,
+    temporary,
+    record: current,
+    connection: setup?.active_connection,
+  });
+  return (
+    <div className={focusMode ? "ai-chat-page ai-chat-page--focus" : "ai-chat-page"}>
+      <div className={detailsOpen ? "ai-chat-workspace has-details" : "ai-chat-workspace"} {...(focusMode ? { role: "region", "aria-label": "AI Chat, focus view" } : {})}>
+        <AiChatRail
+          conversationId={conversationId}
+          conversations={conversations}
+          onArchive={() => void archiveConversation()}
+          onDelete={() => current && setDeleteTarget({ type: "conversation", id: current.id, name: current.title })}
+          onExport={() => void exportConversation()}
+          onNew={() => newConversation(false)}
+          onOpen={(item) => void openConversation(item)}
+          onRename={() => setRenameTitle(current?.title ?? "")}
+          onSearch={setSearch}
+          onTemporary={() => newConversation(true)}
+          onToggleArchive={() => { newConversation(); setShowArchived((value) => !value); }}
+          search={search}
+          showArchived={showArchived}
+          temporary={temporary}
+        />
+        <section aria-label="Chat" className="ai-chat-main">
+          <AiChatToolbar
+            agents={agents}
+            agentsResolved={agentsResolved}
+            agentsReading={{ ...agentsReading, administrator }}
+            archived={Boolean(current?.archived)}
+            busy={busy !== ""}
+            // `undefined` until `/ai-chat/setup` answers and again while a
+            // connection is being activated: at both moments Vaelor does not
+            // know what this machine can run, and the picker says so.
+            connection={setup && busy !== "connection" ? setup.active_connection : undefined}
+            connectionBusy={busy === "connection"}
+            connections={setup?.connections ?? []}
+            detailsOpen={detailsOpen}
+            focusMode={focusMode}
+            modelFailures={modelFailures}
+            models={models}
+            onActivateConnection={(connection) => void activateConnection(connection)}
+            onChooseModel={(model) => void chooseModel(model)}
+            onSelectAgent={(id) => {
+              setSelectedAgentId(id);
+              setAgentProposal(null);
+              setAgentRunSubmitted(false);
+            }}
+            onToggleDetails={() => setDetailsOpen((value) => !value)}
+            onToggleFocus={() => setFocusMode((value) => !value)}
+            clustering={{ refusals: setup?.connection_refusals ?? {}, clusterId: setup?.cluster_credential_id ?? "" }}
+            selectedAgentId={selectedAgentId}
+            selectedModel={selectedModel}
+            subtitle={temporary ? "No history will be saved" : selectedCollections.length ? "Cited knowledge enabled" : "General model knowledge"}
+            temporary={temporary}
+            thinking={thinking}
+            title={temporary ? "Temporary chat" : current?.title || "New chat"}
+          />
+          {notice && <Notice className="ai-chat-notice" severity={noticeIsError ? "danger" : "info"}><span>{notice}</span><Button aria-label="Dismiss notification" className="ai-chat-ghost ai-chat-notice__dismiss" onClick={() => setNotice("")} type="button" variant="quiet">Dismiss</Button></Notice>}
+          <AiChatThread
+            busy={busy === "chat"}
+            canModify={!temporary && Boolean(conversationId)}
+            generating={pending && pending.ticket === viewTicket ? { model: pending.model } : null}
+            messages={messages}
+            model={selectedModel || (agentProposal ? "Agent proposal" : "No model selected")}
+            onFork={forkConversation}
+            onNotice={setNotice}
+            onRegenerate={regenerate}
+            onRetry={retryAnswer}
+            onStop={stopGeneration}
+            onSuggestion={setInput}
+            resumed={resumed}
+          >
+            {agentProposal && (
+              <AiChatProposalCard
+                busy={busy !== ""}
+                onOpenRun={openAgentRun}
+                onReview={() => void reviewAgentRun()}
+                proposal={agentProposal}
+                submitted={agentRunSubmitted}
+              />
+            )}
+          </AiChatThread>
+          <AiChatComposer
+            busy={busy === "chat"}
+            collections={setup?.collections ?? []}
+            model={composerModel}
+            onChange={setInput}
+            onFile={(file) => void ingestFile(file)}
+            onOpenDetails={() => setDetailsOpen(true)}
+            onSubmit={(event) => void send(event)}
+            selectedCollections={selectedCollections}
+            session={session}
+            temporary={temporary}
+            webSearch={webSearch}
+            value={input}
+          />
+        </section>
+        {detailsOpen && (
+          <AiChatDetails
+            activeCollection={activeCollection}
+            busy={busy}
+            collectionDescription={collectionDescription}
+            collectionName={collectionName}
+            documents={documents}
+            onActivateConnection={(connection) => void activateConnection(connection)}
+            onActiveCollection={setActiveCollection}
+            onClose={() => setDetailsOpen(false)}
+            onCollectionDescription={setCollectionDescription}
+            onCollectionName={setCollectionName}
+            onCreateCollection={(event) => void createCollection(event)}
+            onDeleteCollection={(collection) => setDeleteTarget({ type: "collection", id: collection.id, name: collection.name })}
+            onDeleteDocument={(id) => void removeDocument(id)}
+            onFile={(file) => void ingestFile(file)}
+            onToggleCollection={(id) => void toggleCollection(id)}
+            selectedCollections={selectedCollections}
+            session={session}
+            setup={setup}
+          />
+        )}
+      </div>
+      <TextPromptDialog
+        busy={busy === "rename"} error={dialogAction.error}
+        description="Use a short name that will be easy to find later."
+        label="Chat name"
+        onCancel={closeRename}
+        onChange={setRenameTitle}
+        onSubmit={() => void renameConversation()}
+        open={renameTitle !== null}
+        title="Rename chat"
+        value={renameTitle ?? ""}
+      />
+      <ConfirmDialog
+        busy={busy === "delete"} error={dialogAction.error}
+        confirmLabel="Delete permanently" irreversible
+        description={deleteTarget?.type === "collection" ? "All indexed files and chunks in this collection will be permanently deleted. Saved chats remain." : "This conversation and every message in it will be permanently deleted."}
+        onCancel={() => { dialogAction.clear(); setDeleteTarget(null); }}
+        onConfirm={() => void confirmDelete()}
+        open={Boolean(deleteTarget)}
+        title={`Delete ${(deleteTarget?.name || "item").replace(/[.!?,;:]+$/, "")}?`}
+      />
+    </div>
+  );
+}

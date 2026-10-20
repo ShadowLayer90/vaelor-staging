@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vaelor-control-plane"
+authors = [
+  { name="Vaelor contributors" },
+]
+description = "Vaelor edge-compute control plane with SunFounder Pironman hardware support"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+]
+dynamic = ["version"]
+
+dependencies = [
+  "flask",
+  "flask_cors",
+  "influxdb",
+  "pyudev",
+  "configupdater",
+  "cryptography>=43",
+  "packaging",
+  "paramiko>=3.4",
+  "websockify>=0.12",
+  "waitress>=3.0",
+  "pypdf>=6",
+  "xlrd>=2",
+  "PyYAML>=6,<7",
+  "segno>=1.6,<2",
+]
+
+[project.scripts]
+vaelor = "vaelor:main"
+vaelor-workload-executor = "vaelor.executor_service:main"
+vaelor-workload-broker = "vaelor.workload_broker:main"
+vaelor-application-research = "vaelor.application_research_server:main"
+vaelor-credential-broker = "vaelor.credential_broker:main"
+vaelor-system-update = "vaelor.system_update:main"
+vaelor-appliance-upgrade = "vaelor.appliance_upgrade:main"
+vaelor-migrate = "vaelor.migration:main"
+vaelor-state = "vaelor.portable_state:main"
+vaelor-refresh-models = "vaelor.deployment_refresh:main"
+vaelor-vnc-tls-proxy = "vaelor.tls_proxy:main"
+# Compatibility aliases retained for one documented deprecation window.
+pm_dashboard = "pm_dashboard:main"
+pm_workload_executor = "pm_dashboard.executor_service:main"
+pm_credential_broker = "pm_dashboard.credential_broker:main"
+pm_system_update = "pm_dashboard.system_update:main"
+
+[tool.setuptools.packages.find]
+include = ["pm_dashboard*", "vaelor*"]
+
+[tool.setuptools.package-data]
+vaelor = ["www_v2/**/*", "appliance_units/*.service", "build_stamp.json", "worker_profile_keys/*.gpg", "data/*.txt", "vllm_moe_plugin/*.py", "vllm_moe_plugin/*.hip", "vllm_moe_plugin/*.dist-info/*"]
+
+[tool.setuptools.data-files]
+"share/doc/vaelor" = [
+  "README.md",
+  "THIRD_PARTY_NOTICES.md",
+  "ASSET_PROVENANCE.md",
+  "SUPPORTED_PLATFORMS.md",
+  "HISTORY.md",
+  "ARCHITECTURE.md",
+  "CONTRIBUTING.md",
+  "RELEASE.md",
+  "SECURITY.md",
+  "SUPPORT.md",
+]
+# What the installer and uninstaller of THIS release read from their own folder
+# (release_snapshot.PAYLOAD), so a console update can refresh
+# /usr/lib/vaelor/release from the wheel it installs (vaelor/release_snapshot.py).
+"share/vaelor/release" = [
+  "deploy/install-vaelor.sh",
+  "deploy/maintain-vaelor.sh",
+  "deploy/fetch-npu-model.sh",
+  "deploy/amdrocm-keyring.gpg",
+  "requirements-release.txt",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "vaelor.__version__"}

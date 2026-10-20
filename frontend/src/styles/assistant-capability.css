@@ -1,0 +1,85 @@
+/*
+ * The capability strip above the Assistant's answer (AssistantCapabilityStrip),
+ * and the resumed-wait banners AI Chat shows while it waits on a reply.
+ */
+
+/*
+ * One line. Three of the four chips restated the scope, its qualifier and the
+ * answering model — all already named on the screen — and the only two that
+ * carried new information were the only two that could be clicked, which was
+ * invisible because all four looked identical. The restatements are quiet text
+ * now; the chip styling means "you can act on this".
+ */
+
+.capability-note {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text-muted);
+}
+
+.capability-note strong {
+  color: var(--text-secondary);
+  font-size: var(--font-size-body-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.capability-note small {
+  color: var(--text-muted);
+  font-size: var(--font-size-data-sm);
+  overflow-wrap: anywhere;
+}
+
+.capability-chip {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-raised);
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.capability-chip strong {
+  color: var(--text-primary);
+  font-size: var(--font-size-body-sm);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+.capability-chip small {
+  color: var(--text-muted);
+  font-size: var(--font-size-data-sm);
+  white-space: nowrap;
+}
+
+.capability-chip--link:hover,
+.capability-chip--link:focus-visible,
+.capability-chip--action:hover,
+.capability-chip--action[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface-raised));
+}
+
+/*
+ * A question the appliance is still answering after a reload. Quiet, because
+ * the honest message is "nothing is wrong, keep waiting" - but present, which
+ * is the entire point: it used to be a question sitting alone in the transcript
+ * with no spinner, no error and no explanation for ninety seconds.
+ */
+.assistant-resumed-wait {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--font-size-body-sm);
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--bg-canvas) 22%, transparent);
+}
+
+.assistant-resumed-wait--lost {
+  border-left-color: var(--border-strong);
+}

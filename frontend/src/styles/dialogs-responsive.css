@@ -1,0 +1,376 @@
+@media (max-width: 1200px) {
+  .main {
+    padding-inline: var(--space-5);
+  }
+
+  .device-hero {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.65fr);
+  }
+
+  .system-strip__facts {
+    margin-top: var(--space-5);
+  }
+
+  .system-strip__facts div:first-child {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+@media (max-width: 1024px) {
+  :root {
+    --sidebar-width: 92px;
+  }
+
+  .brand-copy,
+  .sidebar__hardware,
+  .nav-item__state {
+    display: none;
+  }
+
+  .sidebar__brand {
+    justify-content: center;
+    padding-inline: var(--space-3);
+  }
+
+  .nav-item {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    padding: 0 2px;
+  }
+
+  /*
+   * The rail keeps the name. Dropping the labels left nine destinations as nine
+   * glyphs behind a native `title` that only appears after a hover delay and
+   * never for a keyboard or touch reader - and the two destinations this
+   * product's distinction rests on, Assistant and AI Chat, became two similar
+   * icons exactly where the word mattered most. The label stacks under the icon
+   * the way the mobile bar already does it. VD-200: a longer name wraps to a
+   * second line between words ("Remote / console") rather than shortening to
+   * "Remote cons..." - a cut name is the label lost again.
+   */
+  .sidebar__nav--desktop .nav-item {
+    min-height: 52px;
+    align-content: center;
+    gap: 2px;
+  }
+
+  .sidebar__nav--desktop .nav-item__label {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    font-size: var(--font-size-data-sm);
+    line-height: 1.3;
+    letter-spacing: -0.02em;
+    text-align: center;
+    white-space: normal;
+    overflow-wrap: normal;
+  }
+
+  .system-strip__facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-4);
+  }
+
+  .system-strip__facts div {
+    min-width: 0;
+  }
+
+  .system-strip__os dd {
+    white-space: normal;
+  }
+
+  .lighting-preview {
+    min-height: 390px;
+  }
+}
+
+@media (max-width: 720px) {
+  :root {
+    --sidebar-width: 0px;
+    /* The phone's navigation is a bar fixed to the bottom edge. Its height
+       follows the browser's font size (72px at the default 16px), so a raised
+       font grows the bar and the page padding beneath it together (W8-3). */
+    --mobile-nav-height: max(72px, 4.5rem);
+    /* What the page keeps clear of the bar: the bar's real height, measured by
+       the Sidebar (--mobile-nav-bar-height), when it is taller than one row -
+       a raised font gives it a second row (W8-D2). */
+    --mobile-nav-clearance: max(var(--mobile-nav-height), var(--mobile-nav-bar-height));
+  }
+
+  /* WCAG 2.4.11 (UX-A9), the bottom half: keyboard focus scrolled into view
+     must stop above the fixed navigation bar, as it stops below the topbar. */
+  html {
+    scroll-padding-bottom: calc(var(--mobile-nav-clearance) + var(--space-4));
+  }
+
+  .sidebar {
+    inset: auto 0 0;
+    width: auto;
+    min-height: var(--mobile-nav-height);
+    container: mobile-bar / inline-size;
+    border-top: 1px solid var(--border-default);
+    border-right: 0;
+  }
+
+  .sidebar__brand {
+    display: none;
+  }
+
+  .sidebar__nav--desktop {
+    display: none;
+  }
+
+  .sidebar__nav--mobile {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    width: 100%;
+    padding: var(--space-2);
+  }
+
+  .nav-item {
+    min-height: 54px;
+    align-content: center;
+    gap: 3px;
+  }
+
+  /*
+   * The bar is pinned to the bottom at a fixed 72px. Longer canonical names
+   * ("Remote console", "Apps and AI") wrapped to a second line, grew each item
+   * past that height and pushed the labels off the bottom edge of the screen,
+   * where nothing can scroll them back. Keep every label on one line and let it
+   * shorten instead.
+   */
+  .sidebar {
+    overflow: hidden;
+  }
+
+  .nav-item__label {
+    display: block;
+    overflow: hidden;
+    font-size: var(--font-size-body-sm);
+    letter-spacing: -0.02em;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow-wrap: normal;
+  }
+
+  /* W7-D3: the 1024 px rule gives each item one "1fr" column, whose minimum is
+     its label's full width, so at 320 px "Remote console" ran 20 px into Home
+     and System. Each column may shrink to its fifth of the bar, and a long name
+     takes a second line between its words; the icon row and the bar's padding
+     give back the room two lines need inside the 72 px bar. A name is never cut
+     or broken inside a word. */
+  .sidebar__nav--mobile {
+    padding-block: var(--space-1);
+  }
+
+  .sidebar__nav--mobile > .nav-item,
+  .sidebar__nav--mobile > .mobile-nav-more > .nav-item {
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    gap: 2px;
+    padding-inline: 1px;
+  }
+
+  .sidebar__nav--mobile > .nav-item .nav-item__icon,
+  .sidebar__nav--mobile > .mobile-nav-more > .nav-item .nav-item__icon {
+    height: 20px;
+  }
+
+  /* W8-3 / W8-D2: under a raised text size a fifth of a phone is narrower
+     than "console" at the label size (about 3.1 of the bar's ems per column),
+     and a name would run into its neighbour. Hiding the names there (icons
+     only) took the words from exactly the owner who enlarged them (WCAG
+     1.4.4), so the bar takes a second row instead: three columns, every name
+     shown whole. The bar grows; the page's clearance follows its real height. */
+  @container mobile-bar (max-width: 16.5em) {
+    .sidebar__nav--mobile {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      row-gap: var(--space-1);
+    }
+  }
+
+  .sidebar__nav--mobile > .nav-item .nav-item__label,
+  .sidebar__nav--mobile > .mobile-nav-more > .nav-item .nav-item__label {
+    width: 100%;
+    line-height: 1.3;
+    text-align: center;
+    white-space: normal;
+    overflow-wrap: normal;
+  }
+
+  .mobile-nav-more {
+    min-width: 0;
+  }
+
+  .mobile-nav-more > summary {
+    list-style: none;
+  }
+
+  .mobile-nav-more > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .mobile-nav-more__menu {
+    position: fixed;
+    right: var(--space-2);
+    bottom: calc(var(--mobile-nav-clearance) + var(--space-2));
+    left: var(--space-2);
+    z-index: 32;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2);
+    padding: var(--space-3);
+    background: var(--bg-surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-modal);
+  }
+
+  .mobile-nav-more__menu > strong {
+    grid-column: 1 / -1;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--font-size-body-sm);
+  }
+
+  .mobile-nav-more__menu .nav-item {
+    grid-template-columns: 30px minmax(0, 1fr);
+    justify-items: start;
+    min-height: 44px;
+    padding-inline: var(--space-2);
+  }
+
+  .mobile-nav-more__menu .nav-item__label {
+    font-size: var(--font-size-body-sm);
+  }
+
+  .nav-item--active::after {
+    position: absolute;
+    inset: auto 25% -9px;
+    height: 2px;
+    background: var(--accent);
+    content: "";
+  }
+
+  .workspace {
+    margin-left: 0;
+    padding-bottom: calc(var(--mobile-nav-clearance) + var(--space-4));
+  }
+
+  .topbar {
+    padding: 0 var(--space-4);
+  }
+
+  .topbar__identity {
+    display: flex;
+  }
+
+  .connection-state,
+.operator-chip {
+    display: none;
+  }
+
+  .main {
+    padding: var(--space-6) var(--space-4) var(--space-8);
+  }
+
+  .lighting-preview {
+    min-height: 340px;
+    padding: var(--space-4);
+  }
+
+  /*
+   * Below 720px the row stacks, so the field takes the width it is given
+   * rather than the width its own content wants.
+   */
+  .color-field {
+    width: 100%;
+  }
+
+  /*
+   * Four columns left every field a 17.75px content box (6ch resolves to
+   * 42.05px, minus 32px padding and a 2px border), so hex and each channel
+   * showed one or two characters at a time. The trigger and the hex value now
+   * take a full row each and only the three channels share one, which gives
+   * hex the whole width and each channel about 45px of text room at 320px.
+   *
+   * The old override was written as `.color-field__hex { grid-column: 2 / -1 }`,
+   * but `Input` puts that class on the `<input>`, which is not a grid item —
+   * the rule was inert at every width. The grid items are the `.ui-field`
+   * wrappers, selected here by the field they contain.
+   */
+  .color-field__entry {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .color-field__swatch,
+  .color-field__entry > :has(> .color-field__hex) {
+    grid-column: 1 / -1;
+  }
+
+  .page-heading {
+    align-items: flex-start;
+  }
+
+  .page-heading h1 {
+    font-size: 28px;
+  }
+
+  .page-heading p {
+    max-width: 250px;
+  }
+
+  .system-strip__facts div {
+    min-width: 0;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  /* W8-D2: at 125% text on 320 px a fixed half-width column was narrower
+     than "administrator", so it broke ("Administrat/or"). A column is never
+     narrower than about one long word - the facts drop to one column instead -
+     so only a value wider than the whole line (a long version string) breaks. */
+  .system-strip__facts dd {
+    font-size: var(--font-size-body-sm);
+    overflow-wrap: anywhere;
+  }
+
+  .system-strip__facts {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9em), 1fr));
+    gap: var(--space-4);
+  }
+
+  .system-strip__os dd {
+    white-space: normal;
+  }
+
+  .device-hero {
+    min-height: auto;
+    grid-template-columns: 1fr;
+  }
+
+  .device-hero__content {
+    padding: var(--space-4);
+  }
+
+  .device-hero__visual {
+    min-height: 250px;
+    border-top: 1px solid var(--border-subtle);
+    border-left: 0;
+  }
+
+  .device-hero__visual img {
+    inset: var(--space-3);
+    width: calc(100% - (var(--space-3) * 2));
+    height: calc(100% - (var(--space-3) * 2));
+  }
+
+  .dialog__actions {
+    flex-direction: column-reverse;
+  }
+
+  .dialog__actions .ui-button {
+    width: 100%;
+  }
+}

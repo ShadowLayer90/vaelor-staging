@@ -1,0 +1,76 @@
+.fleet-page {
+  width: 100%;
+  margin-inline: auto;
+  display: grid;
+  gap: var(--space-5);
+}
+
+/* A Fleet machine's drawing (NodeMachineMark): the machine its discovered
+   architecture implies, or the generic mark when that could not be told. */
+.cluster-capacity__mark {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  color: var(--info);
+  border: 1px solid color-mix(in srgb, var(--info) 35%, transparent);
+  background: color-mix(in srgb, var(--info) 8%, transparent);
+}
+.cluster-capacity__mark--machine { color: var(--text-primary); }
+.cluster-capacity__mark svg { width: 40px; height: auto; }
+.cluster-capacity__mark--machine svg { width: 44px; }
+
+/* -------------------------------------------------------------------------
+   The Setup / Fleet tab split. The tab strip is the shared TabSet primitive;
+   the panel drops its default frame so each tab's own sections sit directly on
+   the page rather than inside a nested card.
+   --------------------------------------------------------------------------
+   `--category-app` is the one decorative colour with no semantic token: the
+   fleet distinguishes models (cyan, `--info`) from apps by hue, exactly as the
+   workloads catalog already tints a model category. It carries no state
+   meaning, so it is defined once here and referenced through var() everywhere,
+   and its single literal is a reviewed decorative approval in the baseline. */
+.fleet-page { --category-app: #a98bff; }
+.ui-tab-set__panel.fleet-tab-panel {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+/* W5-D2: what a Recheck did, on a row of its own at the end of the actions.
+   A full width, not `flex-basis: 100%`: in a wrapping flex row both give the
+   line a row of its own, but in a flex COLUMN the basis is 100% of a stretched
+   card's height and squeezed every reading above it (polish cause 7). The
+   width is the cross axis there, so this is safe in a row, a column or a grid. */
+.recheck-outcome { flex: 0 1 auto; width: 100%; order: 99; margin: 0; }
+p.recheck-outcome { color: var(--text-muted); font-size: var(--font-size-body-sm); }
+
+/* GPU (vLLM) serve sub-form — Easy/Advanced paths, the live fit decision, the
+   GPU worker picker, and the tuning fields, on the same field primitives and
+   token vocabulary as the rest of the modal. */
+.gpu-serve { display: grid; gap: var(--space-4); }
+/*
+ * The field rows. Column counts are stated per breakpoint rather than left to
+ * `auto-fit`, which produced a 3 + 1 ragged wrap of the four tuning fields at
+ * tablet width, and `align-items: start` keeps every control on one baseline
+ * whether or not the field beneath it carries a hint. `gap` is --space-4, the
+ * same step every other field row in this modal uses (>= 16px at mobile
+ * density) rather than the tighter --space-3 this row alone had.
+ */
+.gpu-serve__tuning {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--space-4);
+}
+/* Tablet and small desktop: two columns, so a field keeps enough width for a
+   label like "Cluster interface (optional)" to stay on one line. */
+@media (max-width: 1024px) {
+  .gpu-serve__tuning { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  /* Phone: every field takes the full width, so a 44px control and a wrapped
+     hint each stay inside their own cell. */
+  .gpu-serve__tuning { grid-template-columns: 1fr; }
+}

@@ -1,0 +1,73 @@
+/*
+ * Where the answer said to go. A row of real links, because the sentence above
+ * already names the destination and what was missing was any way to reach it.
+ */
+.assistant-destinations {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+}
+
+.assistant-destinations strong {
+  color: var(--text-muted);
+  font-size: var(--font-size-body-sm);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.assistant-destinations ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.assistant-destinations a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.assistant-destinations a:hover,
+.assistant-destinations a:focus-visible {
+  border-color: var(--focus);
+  color: var(--focus);
+}
+
+.assistant-thinking {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 44px;
+  color: var(--text-secondary);
+}
+
+.assistant-thinking strong { min-width: 0; font-size: var(--font-size-body-sm); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.assistant-thinking small { flex: 0 0 auto; color: var(--text-muted); }
+.assistant-thinking > .ui-button-wrap { flex: 0 0 auto; min-width: max-content; }
+
+.assistant-thinking__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--focus);
+  animation: assistant-pulse 1s ease-in-out infinite;
+}
+
+.assistant-thinking__dot:nth-child(2) { animation-delay: 120ms; }
+.assistant-thinking__dot:nth-child(3) { animation-delay: 240ms; }
+
+@keyframes assistant-pulse {
+  50% { opacity: .25; transform: translateY(-3px); }
+}

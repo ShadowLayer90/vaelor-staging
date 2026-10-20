@@ -1,0 +1,2412 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+# Files this run creates (the venv pip writes as root among them) get modes set
+# here, not by whichever shell started it; every shared file is chmod-ed below.
+umask 022
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+wheel=""
+wheelhouse=""
+unattended=0
+migrate=0
+# "we handle the rest": Docker is provisioned by default, unattended included.
+# Only an explicit --without-docker declines it (#207).
+with_docker="yes"
+skip_system_packages=0
+# The NPU Assistant model (several GB) is fetched by default on a box that has a
+# neural accelerator, so a fresh Strix Halo appliance is turnkey. --without-npu-model
+# defers that large download; install it later with deploy/fetch-npu-model.sh.
+without_npu_model=0
+# The Mode A serving images - the two self-contained gfx1151 ROCm images the GPU
+# AI-Chat model runs in, and the nginx the LLM Server's auth proxy runs - are
+# pulled during install so the first deploy does not sit on a multi-GB pull.
+# --skip-image-pull defers that for an offline or air-gapped install; each launch
+# then pulls its own image on first use.
+skip_image_pull=0
+with_hat=0
+accept_sunfounder_terms=0
+# The physical Pironman 5 board: base/max/mini/pro-max are distinct boards that
+# SunFounder's installer cannot auto-detect (which is why it *takes* --variant),
+# and Vaelor reads the model it writes. Never silently assume "base" (#210).
+hat_variant=""
+# Set to 1 only when the SunFounder HAT runtime is installed *this run*, which is
+# the sole thing that authorises the single reboot at the very end (#207).
+hat_installed=0
+migration_applied=0
+migration_complete=0
+# The household authority (VD-212): a root unique to this install signs the
+# console's certificate. --import-authority restores one the owner exported from
+# an earlier install, so the devices that already trust it stay trusted;
+# --replace-authority lets that import overwrite a different root kept here.
+import_authority=""
+replace_authority=0
+# The appliance venv's interpreter, which runs the authority and prints the
+# trust commands. The two paths below are vaelor/tls_paths.py's PUBLIC_ROOT and
+# PENDING_DIR, retyped because bash cannot import them;
+# tests/test_installer_provisioning.py compares the two.
+vaelor_venv_python="/opt/vaelor/venv/bin/python"
+household_public_root="/opt/vaelor/tls/household-root.crt"
+household_pending_dir="/opt/vaelor/tls/pending"
+# A cluster worker's controller manages its software (VD-194): the profile it
+# lays down leaves this marker, and a full install refuses while it is there
+# (refuse_full_install_on_worker). --leave-worker-role with the exact phrase
+# takes the profile off first, for a worker whose controller is gone.
+WORKER_PROFILE_MARKER="/etc/vaelor/worker-profile.json"
+LEAVE_WORKER_ROLE_PHRASE="this machine leaves its cluster"
+leave_worker_role=""
+legacy_active=()
+legacy_units=(
+  pironman-appliance-recovery.service
+  pironman-credential-broker.service
+  pironman-host-desktop-broker.service
+  pironman-system-update.service
+  pironman-vnc-gateway.service
+  pironman-vnc-tls-proxy.service
+  pironman-workload-executor.service
+  pironman5.service
+)
+vaelor_units=(
+  vaelor-credential-broker.service
+  vaelor-system-update.service
+  vaelor-appliance-upgrade.service
+  vaelor-host-desktop.service
+  vaelor-hardware-bridge.service
+  vaelor-appliance-recovery.service
+  vaelor-application-research.service
+  vaelor-workload-broker.service
+  vaelor-workload-executor.service
+  vaelor-tls-authority.service
+  vaelor-control-plane.service
+  vaelor-vnc-gateway.service
+  vaelor-vnc-tls-proxy.service
+)
+
+restore_legacy_after_failed_migration() {
+  local status=$?
+  if [[ "${migrate}" -eq 1 && "${migration_complete}" -eq 0 ]]; then
+    systemctl disable --now "${vaelor_units[@]}" >/dev/null 2>&1 || true
+    if [[ "${migration_applied}" -eq 1 ]]; then
+      /opt/vaelor/venv/bin/vaelor-migrate --rollback \
+        --confirm rollback-vaelor-migration >/dev/null 2>&1 || true
+    fi
+    if ((${#legacy_active[@]})); then
+      systemctl start "${legacy_active[@]}" >/dev/null 2>&1 || true
+    fi
+  fi
+  exit "${status}"
+}
+trap restore_legacy_after_failed_migration ERR
+
+usage() {
+  cat <<'EOF'
+Usage: install-vaelor.sh [--wheel FILE] [options]
+  --wheel FILE         Versioned Vaelor wheel to install. Optional: when omitted,
+                       the installer downloads the release wheel. A wheel file
+                       lying in the current folder, beside this script or in
+                       your home is never used unless it is named here.
+  --wheelhouse DIR     Offline dependency wheel directory
+  --unattended         Do not prompt; provision the full stack non-interactively
+  --with-docker        Install Docker (the default; kept for compatibility)
+  --without-docker     Explicitly decline Docker; container workloads stay off
+  --skip-system-packages
+                       Native-package integration only; required OS packages
+                       (including InfluxDB 1.x and Docker) must already be
+                       installed
+  --without-npu-model  Do not fetch the on-device NPU Assistant model (several GB)
+                       during install. It is fetched by default where a neural
+                       accelerator is present; use this to defer that large
+                       download and run deploy/fetch-npu-model.sh yourself later.
+  --skip-image-pull    Do not pre-pull the container images the GPU AI-Chat model
+                       and the LLM Server proxy serve from. They are pulled by
+                       default (several GB on a GPU box) so the first deploy
+                       starts at once; skip this on an offline or air-gapped
+                       install and the first deploy pulls them itself, which
+                       needs registry access at that moment.
+  --migrate            Apply the reviewed Pironman-to-Vaelor state migration
+  --with-hat           On a Raspberry Pi, offer the SunFounder Pironman HAT
+                       runtime (fan/OLED/RGB). Unattended, this flag is what
+                       lets the offer proceed without a prompt.
+  --hat-variant V      Which Pironman 5 board: base | max | mini | pro-max.
+                       Required to install the HAT (the boards are distinct and
+                       cannot be auto-detected); the installer refuses to guess.
+  --leave-worker-role PHRASE
+                       This machine was a cluster worker and its controller is
+                       gone: take the worker profile off, then install the full
+                       appliance. PHRASE must be exactly
+                       "this machine leaves its cluster".
+  --accept-sunfounder-terms
+                       Accept SunFounder's terms (GPL-2.0, and what its
+                       install.sh does - see the offer text) up front, so the
+                       HAT offer needs no interactive consent.
+  --import-authority FILE
+                       Restore the household certificate authority exported
+                       from an earlier install (vaelor.tls_authority export), so
+                       the devices that already trust it keep trusting this
+                       console. Asks for its passphrase, or reads
+                       VAELOR_AUTHORITY_PASSPHRASE (run sudo with -E to pass
+                       it). Without this, a fresh install creates a new
+                       authority and keeps an existing one.
+  --replace-authority  With --import-authority: replace a DIFFERENT authority
+                       already on this machine. Every device that trusted the
+                       old one must trust the imported one instead.
+
+"User installs stock Ubuntu, we handle the rest": this installer provisions
+InfluxDB 1.x for telemetry retention and Docker for container workloads by
+default. The one thing it does not provision for you is the SunFounder Pironman
+HAT runtime under /opt/pironman5 - on a Raspberry Pi it offers it, with consent
+and terms; see the offer text and RELEASE.md.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --wheel) wheel="${2:-}"; shift 2 ;;
+    --wheelhouse) wheelhouse="${2:-}"; shift 2 ;;
+    --unattended) unattended=1; shift ;;
+    --migrate) migrate=1; shift ;;
+    --with-docker) with_docker="yes"; shift ;;
+    --without-docker) with_docker="no"; shift ;;
+    --skip-system-packages) skip_system_packages=1; shift ;;
+    --without-npu-model) without_npu_model=1; shift ;;
+    --skip-image-pull) skip_image_pull=1; shift ;;
+    --with-hat) with_hat=1; shift ;;
+    --hat-variant) hat_variant="${2:-}"; shift 2 ;;
+    --accept-sunfounder-terms) accept_sunfounder_terms=1; shift ;;
+    --leave-worker-role) leave_worker_role="${2:-}"; shift 2 ;;
+    --import-authority) import_authority="${2:-}"; shift 2 ;;
+    --replace-authority) replace_authority=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+[[ "${EUID}" -eq 0 ]] || {
+  echo "Run this installer as root." >&2
+  exit 1
+}
+
+# Checked before anything is installed: an unreadable export found an hour into
+# an install would fail it after every package had already gone on.
+if [[ -n "${import_authority}" && ! -r "${import_authority}" ]]; then
+  echo "--import-authority: cannot read ${import_authority}; nothing was changed." >&2
+  exit 1
+fi
+if ((replace_authority)) && [[ -z "${import_authority}" ]]; then
+  echo "--replace-authority only applies with --import-authority FILE; nothing was changed." >&2
+  exit 1
+fi
+
+# Take the worker profile's own pieces off, marker last: the telemetry agent
+# and GPU sampler with their files, and the amd-smi preferences and holds. The
+# folders, Docker, images, model files and AMD's packages stay; the full install
+# that follows owns them from here.
+leave_worker_role_now() {
+  local unit
+  for unit in vaelor-telegraf.service vaelor-gpu-sampler.service; do
+    systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${unit}"
+  done
+  systemctl daemon-reload || true
+  rm -f /usr/local/lib/vaelor/telegraf /usr/local/lib/vaelor/vaelor-telemetry-emitter.pyz \
+    /usr/local/lib/vaelor/vaelor-gpu-sampler.pyz /etc/vaelor/telegraf.conf \
+    /etc/vaelor/controller-ca.pem /etc/apt/preferences.d/vaelor-amd-smi
+  if command -v apt-mark >/dev/null 2>&1; then
+    apt-mark unhold amdrocm-amdsmi7.14 amdrocm-sysdeps7.14 >/dev/null 2>&1 || true
+  fi
+  rm -f "${WORKER_PROFILE_MARKER}"
+  echo "The worker profile was taken off this machine; installing the full appliance."
+}
+
+# G1 (VD-194): a full install never runs over a cluster worker. Its controller
+# lays the worker's software down and keeps it current; a full install here
+# would be a second owner of the same files, with a console and an Assistant
+# of its own.
+refuse_full_install_on_worker() {
+  [[ -e "${WORKER_PROFILE_MARKER}" ]] || return 0
+  if [[ -z "${leave_worker_role}" ]]; then
+    echo "This machine is a cluster worker; its controller manages its software." >&2
+    echo "A full install would give it a console and an Assistant of its own and a" >&2
+    echo "second owner of the same files, so nothing was changed. Remove it from the" >&2
+    echo "cluster on the controller, or, if that controller is gone, run this again with" >&2
+    echo "  --leave-worker-role \"${LEAVE_WORKER_ROLE_PHRASE}\"" >&2
+    exit 1
+  fi
+  if [[ "${leave_worker_role}" != "${LEAVE_WORKER_ROLE_PHRASE}" ]]; then
+    echo "--leave-worker-role needs the exact phrase \"${LEAVE_WORKER_ROLE_PHRASE}\";" \
+      "nothing was changed." >&2
+    exit 1
+  fi
+  leave_worker_role_now
+}
+refuse_full_install_on_worker
+
+# A local wheel is used only when --wheel names it. This installer used to
+# look for one in the current folder, beside itself and in the invoking user's
+# home, and to use it in place of the release: so a development wheel left in
+# a home folder replaced the release a README install meant to fetch, and two
+# of them stopped the install with "found more than one Vaelor wheel" (VD-133
+# 1.5.5 #15, the 1.5.4 cold install). Nothing on disk is picked up by itself.
+#
+# No wheel given: download it from the release. On a PUBLIC repo
+# this needs no auth, which is what lets `git clone && sudo install-vaelor.sh`
+# work with no cd and no curl. Downloaded to a temp dir so it never litters the
+# clone or home with a root-owned wheel. Point elsewhere with VAELOR_REPO /
+# VAELOR_RELEASE_TAG; for a private repo, download it yourself and pass --wheel.
+if [[ -z "${wheel}" ]]; then
+  # The download just below reads the release with python3, which is also the
+  # interpreter Vaelor runs on. The system-package step installs it, but that is
+  # far below and this is its first use, so a base image that ships without
+  # python3 would fail here. Ensure it exists before continuing.
+  if ! command -v python3 >/dev/null 2>&1; then
+    if ((skip_system_packages)); then
+      echo "python3 is required but missing, and system-package installation is disabled." >&2
+      echo "Install python3 (Vaelor's runtime) first, or drop --skip-system-packages." >&2
+      exit 1
+    fi
+    echo "python3 is not installed; installing it before downloading the wheel ..."
+    apt-get update && apt-get install -y python3 || {
+      echo "Could not install python3 automatically; install it and re-run." >&2
+      exit 1
+    }
+  fi
+  wheel_repo="${VAELOR_REPO:-ShadowLayer90/vaelor}"
+  wheel_tag="${VAELOR_RELEASE_TAG:-v1.5.4}"
+  wheel_dl_dir="$(mktemp -d)"
+  echo "No --wheel given; downloading it from ${wheel_repo} release ${wheel_tag} ..."
+  wheel="$(VAELOR_REPO="${wheel_repo}" VAELOR_TAG="${wheel_tag}" \
+    VAELOR_DEST="${wheel_dl_dir}" python3 - <<'PY'
+import json, os, sys, urllib.error, urllib.request
+repo = os.environ["VAELOR_REPO"]; tag = os.environ["VAELOR_TAG"]
+dest = os.environ["VAELOR_DEST"]
+api = "https://api.github.com/repos/{}/releases/tags/{}".format(repo, tag)
+
+
+def get(url, accept="application/vnd.github+json"):
+    return urllib.request.urlopen(urllib.request.Request(
+        url, headers={"Accept": accept, "User-Agent": "vaelor-install"}))
+
+
+try:
+    with get(api) as response:
+        release = json.load(response)
+except urllib.error.HTTPError as error:
+    sys.stderr.write(
+        "Cannot read release {} of {} (HTTP {}). For a private repo, download "
+        "the wheel yourself and pass --wheel FILE.\n".format(tag, repo, error.code))
+    sys.exit(1)
+wheels = [a for a in release.get("assets", [])
+          if str(a.get("name", "")).startswith("vaelor_control_plane-")
+          and str(a.get("name", "")).endswith(".whl")]
+if not wheels:
+    sys.stderr.write("No wheel asset on release {}.\n".format(tag))
+    sys.exit(1)
+asset = wheels[0]
+path = os.path.join(dest, asset["name"])
+with get(asset["browser_download_url"], "application/octet-stream") as response, \
+        open(path, "wb") as output:
+    while True:
+        chunk = response.read(1024 * 1024)
+        if not chunk:
+            break
+        output.write(chunk)
+print(path)
+PY
+)" || { echo "Wheel download failed; pass --wheel FILE instead." >&2; exit 1; }
+  echo "Downloaded wheel: ${wheel}"
+fi
+[[ -f "${wheel}" ]] || {
+  echo "No Vaelor wheel at ${wheel}: pass --wheel with the path of a" >&2
+  echo "vaelor_control_plane-<version>-py3-none-any.whl file." >&2
+  exit 1
+}
+[[ -r /etc/os-release ]] || {
+  echo "Vaelor requires a Linux distribution with /etc/os-release." >&2
+  exit 1
+}
+
+# shellcheck disable=SC1091
+source /etc/os-release
+case "${ID:-}" in
+  ubuntu|debian|raspbian|kali) ;;
+  *)
+    echo "This installer currently supports Debian-family hosts only." >&2
+    exit 1
+    ;;
+esac
+case "$(uname -m)" in
+  aarch64|arm64|x86_64|amd64) ;;
+  *)
+    echo "Vaelor packages currently support arm64 and amd64 only." >&2
+    exit 1
+    ;;
+esac
+
+# Stage the installer, teardown script, and this wheel under
+# /usr/lib/vaelor/release. This is the FIXED path the in-UI "Remove Vaelor"
+# teardown runs (appliance_recovery.RELEASE_MAINTAIN_SCRIPT) and that
+# maintain-vaelor.sh `repair` reads. The native .deb ships them there
+# (tools/build_native_package.py); a wheel-script install must place them too, or
+# the UI uninstaller finds a stale or missing script and fails silently. It lives
+# OUTSIDE /opt/vaelor deliberately, so the teardown can delete /opt/vaelor while
+# still running from here.
+#
+# `stage_release_file SOURCE MODE [NAME]` copies one file in, and skips a file
+# that already IS the staged one: `repair` and the native package run THIS
+# script from /usr/lib/vaelor/release, and GNU install refuses to copy a file
+# onto itself ("are the same file"), which under `set -e` ended every repair
+# there (VD-133 1.5.5).
+stage_release_file() {
+  local source="$1" mode="$2" name="${3:-$(basename "$1")}"
+  local target="/usr/lib/vaelor/release/${name}"
+  [[ -f "${source}" ]] || return 0
+  [[ -e "${target}" && "${source}" -ef "${target}" ]] && return 0
+  install -D -m "${mode}" "${source}" "${target}"
+}
+stage_release_file "${script_dir}/install-vaelor.sh" 0755
+stage_release_file "${script_dir}/maintain-vaelor.sh" 0755
+stage_release_file "${wheel}" 0644
+# And everything else this installer reads from its own folder, so the staged
+# copy that `maintain-vaelor.sh repair` runs finds its constraints, units, the
+# NPU model fetcher and AMD's key beside it (VD-133 1.5.5; the console update
+# refreshes the same list - vaelor/release_snapshot.py PAYLOAD - and a test
+# holds the two equal).
+stage_release_file "${script_dir}/fetch-npu-model.sh" 0755
+stage_release_file "${script_dir}/amdrocm-keyring.gpg" 0644
+if [[ -f "${script_dir}/requirements-release.txt" ]]; then
+  stage_release_file "${script_dir}/requirements-release.txt" 0644
+else
+  stage_release_file "${script_dir}/../requirements-release.txt" 0644
+fi
+for staged_unit in "${script_dir}"/systemd/vaelor-*.service; do
+  stage_release_file "${staged_unit}" 0644 "systemd/$(basename "${staged_unit}")"
+done
+
+# The record of what THIS installer added to the OS, one package name per line,
+# beside the staged scripts so the teardown can read it (it removes /usr/lib/
+# vaelor last, after the purge that consults this). `maintain-vaelor.sh
+# --bare-os` purges only what is named here, keeping the "nothing the installer
+# did not add" promise checkable: a package that was already present when Vaelor
+# was installed is never recorded and so never purged. Recorded immediately
+# BEFORE the apt-get that installs it, and only if dpkg does not already have it
+# installed - the three "already installed; leaving it alone" branches (Docker,
+# InfluxDB, amd-smi) reach their apt-get only when the package is absent, and
+# this guard makes the unconditional installs (novnc) equally honest. Idempotent
+# on a re-run: a name already on the list is not written twice.
+VAELOR_INSTALLED_MARKER="/usr/lib/vaelor/release/installed-by-vaelor"
+record_vaelor_packages() {
+  local package state
+  install -d -m 0755 "$(dirname "${VAELOR_INSTALLED_MARKER}")"
+  for package in "$@"; do
+    state="$(dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null || true)"
+    case "${state}" in
+      ii*) continue ;;
+    esac
+    grep -qxF "${package}" "${VAELOR_INSTALLED_MARKER}" 2>/dev/null && continue
+    printf '%s\n' "${package}" >>"${VAELOR_INSTALLED_MARKER}"
+  done
+}
+
+# The SunFounder Pironman HAT runtime: the one thing "we handle the rest" hands
+# back to the owner, as an offer rather than a silent assumption (#207).
+#
+# Vaelor's hardware bridge drives the fan, OLED and RGB by importing `pironman5`
+# from /opt/pironman5/venv and reading /opt/pironman5/config.json (see
+# vaelor/hardware_bridge.py). Only SunFounder's own installer provisions that
+# runtime, and a *clean pinned non-interactive* install through it is not
+# achievable, which is why this offers rather than runs it:
+#   * Its install.sh hardcodes pm_auto@v2, pm_dashboard@v2 and sf_rpi_status@main
+#     - floating branches, with no flag to pin them - and sources its installer
+#     framework cache-busted (`?$(date +%s)`) from a second repo's main branch.
+#     Pinning the pironman5 repo itself leaves those three floating (#130).
+#   * It reboots the Pi at the end. Running it *inside* this installer could
+#     reboot mid-provision, before Vaelor finishes.
+#   * It enables a competing pironman5.service + pm_dashboard web control plane
+#     that Vaelor stubs out (hardware_bridge sets PMDashboard=None so the legacy
+#     package cannot compose a second control plane). We neutralise that below
+#     whenever the runtime is present, however it got there.
+# So the offer prints the command pinned as far as the installer allows (a
+# specific pironman5 tag) with SunFounder's terms stated, and the owner runs it
+# as its own step. The bridge is optional at runtime: it serves host power on
+# every machine and reports the enclosure absent when this runtime is missing,
+# so declining still succeeds.
+#
+# Pinned to a specific SunFounder release tag rather than a branch (#130). The
+# residual floating sub-packages above are SunFounder's, inside their installer,
+# and are stated in the offer rather than hidden.
+SUNFOUNDER_PIRONMAN_TAG="v1.3.17"
+
+host_is_raspberry_pi() {
+  [[ -e /boot/firmware/config.txt || -e /boot/config.txt ]] && return 0
+  grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null
+}
+
+# Whenever the SunFounder runtime is present - whether the owner accepted the
+# offer, or it was already on the appliance - keep only the hardware daemon our
+# bridge imports and shut down the web control plane that would fight Vaelor's.
+neutralize_sunfounder_control_plane() {
+  [[ -d /opt/pironman5 ]] || return 0
+  if systemctl list-unit-files pironman5.service >/dev/null 2>&1 ||
+    [[ -e /etc/systemd/system/pironman5.service ]]; then
+    # Disable *and* mask: their pironman5.service runs pm_dashboard's own web
+    # listener. Vaelor imports the pironman5 library directly in
+    # vaelor-hardware-bridge.service, so removing their service removes the
+    # competing control plane without touching the daemon the bridge needs.
+    systemctl disable --now pironman5.service >/dev/null 2>&1 || true
+    # `systemctl mask` refuses to mask a unit whose real file already lives in
+    # /etc/systemd/system - it will not overwrite an admin unit - and SunFounder
+    # installs pironman5.service exactly there. On the first live HAT run the
+    # mask was swallowed by `|| true` and the unit was left merely *disabled*,
+    # which a later action can re-enable; mask is the stronger guarantee VD-098
+    # intends (#210). So remove their unit file first, reload, THEN mask (a
+    # symlink to /dev/null), and verify the mask actually stuck.
+    rm -f /etc/systemd/system/pironman5.service
+    systemctl daemon-reload
+    systemctl mask pironman5.service >/dev/null 2>&1 || true
+    if [[ "$(systemctl is-enabled pironman5.service 2>/dev/null || true)" == "masked" ]]; then
+      echo "SunFounder's pironman5.service is masked; Vaelor owns the only control plane."
+    else
+      echo "Warning: SunFounder's pironman5.service could not be masked; it is at" >&2
+      echo "least disabled, but re-check it by hand (#210)." >&2
+    fi
+  fi
+  if [[ -f /opt/pironman5/config.json ]]; then
+    echo "Pironman HAT runtime present; the hardware bridge reads /opt/pironman5/config.json."
+  fi
+}
+
+hat_variant_is_valid() {
+  case "$1" in
+    base | max | mini | pro-max) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Install SunFounder's HAT runtime, pinned, without letting it reboot mid-run.
+#
+# Their install.sh ends with `installer_prompt_reboot`, which reads `< /dev/tty`
+# (not stdin), so closing stdin cannot answer it and would leave the read
+# blocking or spinning. We give the child its own pseudo-terminal via `script`
+# and feed it "n", so the enclosure overlays are written but the Pi is NOT
+# rebooted here - Vaelor's own single reboot at the very end is the only one.
+install_pironman_hat_pinned() {
+  if (
+    set -e
+    apt-get update
+    command -v git >/dev/null 2>&1 || apt-get install -y git
+    command -v script >/dev/null 2>&1 || apt-get install -y bsdutils
+    rm -rf /tmp/pironman5-hat
+    git clone https://github.com/sunfounder/pironman5 /tmp/pironman5-hat
+    git -C /tmp/pironman5-hat checkout "${SUNFOUNDER_PIRONMAN_TAG}"
+    # Pin the *installed* code, not just this script. install.sh re-clones
+    # pironman5 into $HOME and, left alone, tracks the floating 1.3.x branch - it
+    # self-reported 1.3.18 on the first Pi run while we "pinned" v1.3.17, because
+    # the checkout above only pins which install.sh runs, not what it installs.
+    # install.sh's PIRONMAN5_BRANCH override makes that re-clone
+    # `git clone -b ${SUNFOUNDER_PIRONMAN_TAG}`, so the code that runs is the tag.
+    # (pm_auto/pm_dashboard/sf_rpi_status stay floating - hardcoded with no
+    # override - which the accepted terms state.)
+    #
+    # Answer SunFounder's mid-install reboot prompt with 'n' through the pty,
+    # BOUNDED. An unbounded feed of 'n' buffered ~5.7 GB into `script` over the
+    # minutes install.sh runs without reading it, and OOM-killed a 7.7 GB Pi
+    # (#209): an unbounded producer with an absent consumer. A few hundred lines
+    # queue in the pty until the one reboot prompt reads a single 'n', then the
+    # feed ends. pipefail off so the feed dying by SIGPIPE when `script` exits
+    # first is not read as a failed install; `script`'s own status is what counts.
+    set +o pipefail
+    { for _ in $(seq 200); do printf 'n\n'; done; } | script -qec \
+      "PIRONMAN5_BRANCH=${SUNFOUNDER_PIRONMAN_TAG} bash /tmp/pironman5-hat/install.sh --variant ${hat_variant} </dev/null" \
+      /dev/null
+  ); then
+    hat_installed=1
+    echo "SunFounder Pironman HAT runtime installed (${hat_variant}, pinned ${SUNFOUNDER_PIRONMAN_TAG})."
+    echo "No reboot yet - Vaelor finishes first, then reboots once at the end."
+  else
+    echo "SunFounder HAT install did not complete; the enclosure will report as" >&2
+    echo "absent and every other Vaelor feature works. Continuing." >&2
+  fi
+}
+
+offer_pironman_hat() {
+  host_is_raspberry_pi || return 0  # x86/Z2 have no HAT: offer nothing.
+  if [[ -f /opt/pironman5/config.json && -d /opt/pironman5/venv ]]; then
+    echo "Pironman HAT runtime found under /opt/pironman5; fan/OLED/RGB will use it."
+    return 0
+  fi
+  local proceed=0
+  if ((with_hat && accept_sunfounder_terms)); then
+    proceed=1
+  elif ((unattended)); then
+    echo "NOTE: the SunFounder Pironman HAT runtime is not installed; fan/OLED/RGB"
+    echo "control needs it. Re-run with --with-hat --accept-sunfounder-terms"
+    echo "--hat-variant <base|max|mini|pro-max> to install it, or install it"
+    echo "yourself. Vaelor handles everything else and reports the enclosure as"
+    echo "absent without it."
+    return 0
+  fi
+  # Resolve the board model *before* showing the terms, so the terms name it and
+  # so we never silently assume 'base' - SunFounder's boards are physically
+  # distinct and its installer cannot auto-detect them, so a wrong guess mislabels
+  # a Max as a base board (#210). Interactive: ask. Unattended: --hat-variant is
+  # required, and an empty/invalid value fails clearly rather than defaulting.
+  if [[ -z "${hat_variant}" && "${unattended}" -eq 0 ]]; then
+    printf "Which Pironman 5 board? [base/max/mini/pro-max] "
+    read -r hat_variant </dev/tty 2>/dev/null || hat_variant=""
+  fi
+  if ! hat_variant_is_valid "${hat_variant}"; then
+    echo "The Pironman HAT needs its board model. Pass --hat-variant with one of" >&2
+    echo "base, max, mini, pro-max. Refusing to guess 'base' - that would" >&2
+    echo "mislabel a different board (#210). Skipping the HAT runtime." >&2
+    return 0
+  fi
+  # The terms have to be honest, so state what accepting will actually do.
+  echo "----------------------------------------------------------------------"
+  echo "Optional: SunFounder Pironman HAT runtime (fan, OLED, RGB control)"
+  echo "This is SunFounder's software, not Vaelor's. Accepting will:"
+  echo "  * Install it for your Pironman 5 board: ${hat_variant}."
+  echo "  * Install SunFounder's code, licensed GPL-2.0, from github.com/sunfounder,"
+  echo "    pinned to tag ${SUNFOUNDER_PIRONMAN_TAG}. Its installer also pulls"
+  echo "    several SunFounder packages (pm_auto, pm_dashboard, sf_rpi_status)"
+  echo "    from floating branches, which are SunFounder's and not pinnable here."
+  echo "  * Create a 'pironman5' system user with passwordless sudo for"
+  echo "    shutdown/reboot/systemctl, and write Raspberry Pi device-tree overlays."
+  echo "  * Have Vaelor mask SunFounder's own web dashboard so only Vaelor's"
+  echo "    control plane runs; the hardware daemon stays for Vaelor's bridge."
+  echo "  * Require one reboot at the very end (after Vaelor finishes) to load the"
+  echo "    overlays. Declining is fine - the enclosure just reports as absent."
+  if ((proceed == 0)); then
+    printf "Install the SunFounder HAT runtime now, accepting these terms? [y/N] "
+    local answer=""
+    read -r answer </dev/tty 2>/dev/null || answer=""
+    # Accept "y" and the full word "yes" (any case). A naive user typing "yes"
+    # to an opt-in must not be read as a decline (review UX #207). Anything else
+    # still declines - default-no is correct for this opt-in.
+    [[ "${answer}" =~ ^[Yy]([Ee][Ss])?$ ]] && proceed=1
+  fi
+  if ((proceed)); then
+    install_pironman_hat_pinned
+  else
+    echo "Skipping the HAT runtime. Re-run with --with-hat to be offered it again."
+  fi
+}
+
+export DEBIAN_FRONTEND=noninteractive
+wait_for_packages() {
+  local deadline=$((SECONDS + 900))
+  local locks=(
+    /var/lib/dpkg/lock-frontend
+    /var/lib/dpkg/lock
+    /var/lib/apt/lists/lock
+    /var/cache/apt/archives/lock
+  )
+  while command -v fuser >/dev/null 2>&1 &&
+    fuser "${locks[@]}" >/dev/null 2>&1; do
+    if ((SECONDS >= deadline)); then
+      echo "Ubuntu's package service stayed busy for 15 minutes. Try again later." >&2
+      exit 1
+    fi
+    echo "Waiting for Ubuntu's background package service to finish..."
+    sleep 5
+  done
+  dpkg --configure -a
+}
+if ((skip_system_packages)); then
+  # setfacl is not required: without it the state-root layout below reports
+  # that GPU models cannot be served and leaves the rest working (ACC-063).
+  for command in python3 openssl systemctl systemd-creds curl; do
+    command -v "${command}" >/dev/null || {
+      echo "Required native-package dependency is missing: ${command}" >&2
+      exit 1
+    }
+  done
+  [[ -d /usr/share/novnc ]] || {
+    echo "The native package requires the novnc OS package." >&2
+    exit 1
+  }
+else
+  wait_for_packages
+  apt-get update
+  # novnc is Vaelor's to remove on a bare-OS teardown; python3/openssl/curl are
+  # shared OS tools it never records or purges. record before the install so a
+  # novnc the operator already had is not claimed.
+  record_vaelor_packages novnc
+  # acl: setfacl gives the control plane's account write on the root-owned
+  # state root below (ACC-063) without making the whole vaelor group a writer.
+  apt-get install -y python3 python3-venv python3-pip openssl novnc curl acl
+fi
+
+# The HAT offer runs here, after base packages: git and a pseudo-terminal are
+# available and the dpkg lock has been waited out. On accept it installs the
+# runtime and sets hat_installed, which the single final reboot is gated on. It
+# creates /opt/pironman5, which neutralize_sunfounder_control_plane (later, in
+# the same run, with no exit between) then takes over from SunFounder's dashboard.
+offer_pironman_hat
+
+# A freshly installed docker.io can report the daemon `active` while containerd
+# has not finished initialising its content store, so the FIRST `docker pull` -
+# the one a Custom Application deploy makes - fails with
+# `mkdir /var/lib/containerd/.../ingest/...: no such file or directory`, and the
+# box only recovers after a manual `systemctl restart containerd docker`. A
+# turnkey appliance must never need that hand repair, so once the services are
+# enabled we actively PROVE the runtime is ready before the install finishes:
+# both daemons are active, `docker info` reports a real storage driver, and a
+# throwaway pull of a tiny image actually forces the content store to
+# initialise. If it is not ready we perform, once, the very restart the manual
+# fix performs, then keep probing with a short backoff to a bounded deadline.
+# Idempotent: on a re-run the pull is cached/instant and the removal is a no-op.
+ensure_docker_ready() {
+  local probe_image="hello-world"
+  local deadline=$((SECONDS + 180))
+  local restarted=0
+  while ((SECONDS < deadline)); do
+    if systemctl is-active --quiet docker.service &&
+      { ! systemctl list-unit-files containerd.service >/dev/null 2>&1 ||
+        systemctl is-active --quiet containerd.service; } &&
+      [[ -n "$(docker info --format '{{.Driver}}' 2>/dev/null)" ]] &&
+      docker pull "${probe_image}" >/dev/null 2>&1; then
+      # The probe image is a throwaway - remove it so the box is left clean.
+      docker rmi "${probe_image}" >/dev/null 2>&1 || true
+      echo "Docker and containerd are ready: storage driver active and the" \
+        "content store initialises a test pull."
+      return 0
+    fi
+    # The uninitialised-content-store failure is exactly what a containerd+docker
+    # restart repairs by hand; do that once, then keep probing until the deadline.
+    if ((restarted == 0)); then
+      echo "Container runtime not ready yet; restarting containerd and docker to" \
+        "initialise the content store..."
+      systemctl restart containerd.service docker.service >/dev/null 2>&1 || true
+      restarted=1
+    fi
+    sleep 3
+  done
+  echo "Docker/containerd did not become ready within 180s: the container" >&2
+  echo "runtime could not initialise its content store, so the first Custom" >&2
+  echo "Application 'docker pull' would fail with a missing /var/lib/containerd" >&2
+  echo "ingest directory - the exact defect this gate exists to prevent." >&2
+  if ((skip_system_packages)); then
+    # Native-package/offline image: the image builder owns the runtime, and this
+    # box may have no registry network. Degrade honestly like the other
+    # skip_system_packages deferrals rather than failing a pre-built image.
+    echo "Native-package install: leaving the container runtime to the image" >&2
+    echo "and continuing." >&2
+    return 0
+  fi
+  exit 1
+}
+
+# Docker is provisioned unconditionally unless the owner passes --without-docker.
+# Container workloads (the Apps and AI surfaces, and system-web-research) do not
+# run without it, so leaving it out silently is the "we handle the rest" gap
+# #207 closes; the opt-out stays for an owner who runs workloads elsewhere.
+if [[ "${with_docker}" != "no" ]]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    if ((skip_system_packages)); then
+      echo "Native-package install expects Docker to be present already." >&2
+      echo "Install docker.io and docker-compose-v2, or re-run without" >&2
+      echo "--skip-system-packages." >&2
+      exit 1
+    fi
+    # docker.io pulls containerd in as a dependency, so Vaelor's install adds it
+    # too; record all three (record skips any the box already had) so --bare-os
+    # purges the engine Vaelor provisioned and no more.
+    record_vaelor_packages docker.io docker-compose-v2 containerd
+    apt-get install -y docker.io docker-compose-v2
+  fi
+  # containerd is the content/runtime store docker layers on, so it must be
+  # enabled and started BEFORE docker. docker.io pulls it in as a dependency but
+  # does not guarantee its content store is initialised; enabling an
+  # already-running unit is a no-op, so this stays idempotent on a re-run.
+  if systemctl list-unit-files containerd.service >/dev/null 2>&1; then
+    systemctl enable --now containerd.service
+  fi
+  systemctl enable --now docker.service
+  # Prove the runtime is fully initialised before anything pulls an image.
+  ensure_docker_ready
+fi
+
+# --- InfluxDB, pinned to the 1.x line -----------------------------------------
+#
+# `vaelor/database.py` speaks the InfluxDB **1.x** API: get_list_database(),
+# create_database(), switch_database(), and InfluxQL ("SHOW DATABASES",
+# "SELECT ... FROM history"). InfluxDB 2.x/3.x removed databases entirely
+# (buckets + Flux), so an accidental 2.x here would silently reinstate the exact
+# "telemetry is not retained" defect VD-095 just fixed - the database would never
+# be created and every row would be dropped, with a 200 from the health endpoint
+# (LESSONS 4). So this must be 1.x, and it is pinned so an install is
+# reproducible rather than "whatever the tag points at today" (#130).
+#
+# Source and pin: one specific .deb for 1.12.4-1 - the current maintained 1.x -
+# fetched from InfluxData's package pool, whose URL names the version and whose
+# bytes are verified against a recorded sha256 (#130). Two deliberate choices,
+# both for the reasons the amd-smi block states:
+#   * A pinned .deb, not `apt install influxdb`. Ubuntu 24.04+ main repos do not
+#     carry the 1.x line at a known version, and the EOL 1.8.10 is no longer in
+#     the release archive. `apt install influxdb` resolves to whatever a repo
+#     happens to publish, which is neither pinned nor guaranteed 1.x. The .deb
+#     URL plus the sha256 *is* the pin.
+#   * We do NOT add an APT source. Fetching one sha-verified .deb from
+#     repos.influxdata.com's pool is a single `curl` + `apt-get install
+#     ./file.deb`; nothing is written to /etc/apt/sources.list*, so the
+#     appliance's standing trust on every future `apt upgrade` is unchanged.
+#     Adding a sources.list entry would be an owner's decision; this is not that.
+INFLUXDB_VERSION="1.12.4-1"
+influxdb_verify() {
+  # Prove the *database* API answers, not merely that a server is up - the same
+  # distinction database.py draws, and the one VD-095 turned on (LESSONS 4).
+  local deadline=$((SECONDS + 90))
+  while ((SECONDS < deadline)); do
+    if command -v influx >/dev/null 2>&1 &&
+      influx -host 127.0.0.1 -port 8086 -execute 'SHOW DATABASES' \
+        >/dev/null 2>&1; then
+      echo "InfluxDB ${INFLUXDB_VERSION} answers SHOW DATABASES on localhost:8086."
+      return 0
+    fi
+    sleep 2
+  done
+  echo "InfluxDB did not answer 'SHOW DATABASES' on localhost:8086 within 90s." >&2
+  echo "Telemetry retention (VD-095) depends on the 1.x database API; refusing" >&2
+  echo "to finish an install that cannot store history." >&2
+  exit 1
+}
+install_influxdb() {
+  if command -v influxd >/dev/null 2>&1; then
+    # A pre-existing influxd could be 2.x, which also provides the `influxd`
+    # binary but has no databases (buckets + Flux) - accepting it silently is
+    # how VD-095 comes back (LESSONS 4). Confirm the 1.x line before trusting it.
+    # `|| true` inside the substitution: under `set -o pipefail`, `head` closing
+    # the pipe early makes grep exit non-zero even on a match, and an empty match
+    # would fail too - either would trip `set -e` on the assignment. A missing or
+    # unparseable version then falls through to the not-1.x refusal below, which
+    # is the safe direction.
+    local existing_version
+    existing_version="$(influxd version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+    if [[ "${existing_version}" != 1.* ]]; then
+      echo "An InfluxDB daemon is already installed but is not 1.x" >&2
+      echo "(reported: '${existing_version:-unknown}'). Vaelor's database.py needs" >&2
+      echo "the 1.x database API; refusing rather than silently accepting 2.x." >&2
+      exit 1
+    fi
+    echo "influxd ${existing_version} (1.x) is already installed; leaving it in place."
+  elif ((skip_system_packages)); then
+    echo "Native-package install expects InfluxDB 1.x to be present already." >&2
+    echo "Install influxdb ${INFLUXDB_VERSION} (the 1.x line, not the 2.x" >&2
+    echo "package), or re-run without --skip-system-packages." >&2
+    exit 1
+  else
+    local arch sha url tmp
+    case "$(uname -m)" in
+      aarch64 | arm64) arch="arm64" ;;
+      x86_64 | amd64) arch="amd64" ;;
+      *)
+        echo "No pinned InfluxDB 1.x .deb for this architecture." >&2
+        exit 1
+        ;;
+    esac
+    # sha256 of influxdb_1.12.4-1_<arch>.deb from InfluxData's package pool,
+    # checked against the signed apt index, recorded so a swapped or truncated
+    # download fails loudly instead of installing something else.
+    case "${arch}" in
+      amd64) sha="39362452cfd9584603e96c185d88b561fa45bc7078e5dbef3a3311b81c45cb5b" ;;
+      arm64) sha="f64f50fdfb9c36e63f8628186ec273b55e2f8e065c46433ac59e35982d4ec99e" ;;
+    esac
+    url="https://repos.influxdata.com/debian/packages/influxdb_${INFLUXDB_VERSION}_${arch}.deb"
+    tmp="$(mktemp --suffix=.deb)"
+    echo "Fetching pinned InfluxDB ${INFLUXDB_VERSION} (${arch}) from InfluxData's pool."
+    curl --fail --location --silent --show-error --max-time 300 -o "${tmp}" "${url}"
+    echo "${sha}  ${tmp}" | sha256sum --check --status || {
+      echo "InfluxDB ${INFLUXDB_VERSION} .deb failed its sha256 pin (#130); refusing." >&2
+      rm -f "${tmp}"
+      exit 1
+    }
+    # This branch is reached only when no influxd is on PATH, so Vaelor is
+    # adding it; record it so --bare-os purges the InfluxDB Vaelor installed and
+    # never one the operator had.
+    record_vaelor_packages influxdb
+    apt-get install -y "${tmp}"
+    rm -f "${tmp}"
+  fi
+  # Bind InfluxDB's HTTP API to loopback only. The 1.x package default is
+  # `[http] bind-address = ":8086"` (every interface) with auth disabled, so on
+  # a LAN-attached appliance anyone on the network could read, write, or DROP
+  # the telemetry database directly - and a cluster worker could bypass the
+  # controller's keyed telemetry-ingest route entirely. Vaelor's own client only
+  # ever connects to 127.0.0.1:8086, so a loopback bind costs nothing. A systemd
+  # env drop-in (INFLUXDB_HTTP_BIND_ADDRESS) is used rather than editing the
+  # packaged influxdb.conf, so a package upgrade cannot silently reopen it.
+  # The same drop-in turns InfluxDB's per-request and per-query logs off
+  # (VD-133 1.5.5 #13: about a million and ~280k journal lines a day); its
+  # errors still reach the journal.
+  # The text is vaelor/influxdb_config.py's DROP_IN_TEXT - a test holds the two
+  # equal - and every update re-applies it from there (VD-217), so a box
+  # updated from the console gets it without re-running this installer.
+  install -d -m 0755 /etc/systemd/system/influxdb.service.d
+  printf '[Service]\nEnvironment=INFLUXDB_HTTP_BIND_ADDRESS=127.0.0.1:8086\nEnvironment=INFLUXDB_HTTP_LOG_ENABLED=false\nEnvironment=INFLUXDB_DATA_QUERY_LOG_ENABLED=false\n' \
+    > /etc/systemd/system/influxdb.service.d/vaelor-localhost.conf
+  systemctl daemon-reload
+  systemctl enable influxdb.service
+  # `restart`, not `enable --now`: a pre-existing daemon that was already running
+  # would otherwise keep its old `:8086` bind until the next reboot.
+  systemctl restart influxdb.service
+  influxdb_verify
+}
+install_influxdb
+
+for group in vaelor vaelor-jobs vaelor-credentials vaelor-vnc vaelor-bridge; do
+  getent group "${group}" >/dev/null || groupadd --system "${group}"
+done
+create_user() {
+  local name="$1" group="$2"
+  id -u "${name}" >/dev/null 2>&1 || useradd \
+    --system --gid "${group}" --home-dir /nonexistent \
+    --shell /usr/sbin/nologin "${name}"
+}
+create_user vaelor vaelor
+create_user vaelor-workloads vaelor-jobs
+create_user vaelor-secrets vaelor-credentials
+create_user vaelor-vnc vaelor-vnc
+create_user vaelor-research vaelor
+usermod -aG vaelor-jobs,vaelor-credentials,vaelor-vnc vaelor
+usermod -aG vaelor vaelor-workloads
+usermod -aG vaelor vaelor-secrets
+usermod -aG vaelor vaelor-vnc
+usermod -aG vaelor vaelor-research
+# The root hardware bridge's socket group (VD-143): exactly the two accounts
+# whose services call the bridge - the control plane and the workload executor
+# and broker. Group `vaelor` is wider (vaelor-research, which reads untrusted
+# web content and runs deployed agents, has it as its PRIMARY group), so the
+# socket is `0660 root:vaelor-bridge`; the bridge also checks each peer's uid
+# (vaelor/bridge_peers.py), which holds even where this group is missing.
+usermod -aG vaelor-bridge vaelor
+usermod -aG vaelor-bridge vaelor-workloads
+getent group docker >/dev/null && usermod -aG docker vaelor-workloads
+
+install -d -m 0755 -o root -g root /opt/vaelor
+install -d -m 0755 -o root -g root /etc/vaelor
+# The staged application workflow used to be gated by VAELOR_APPLICATION_*_ENABLED
+# flags written here. Those flags are gone: the workflow now auto-enables on the
+# presence of a working Assistant model (VD-109), so no application.env is
+# written. The services still reference it as an optional EnvironmentFile
+# (EnvironmentFile=-...), which stays non-fatal when the file is absent.
+install -d -m 0750 -o vaelor -g vaelor /var/log/vaelor
+# The state root. Made here only when it is missing, in the shape a box had
+# before ACC-063; the package installed below lays it out (see "state-root
+# layout" further down) - root-owned, sticky, with write for the vaelor account
+# through an ACL - together with the model cache and the folders root
+# containers mount. One rule, in `vaelor/state_root_layout.py`, which the
+# upgrade broker and the hardware bridge run too, so an upgraded or hot-patched
+# box lands on the same layout a fresh install does.
+if [[ ! -d /var/lib/vaelor ]]; then
+  install -d -m 0750 -o vaelor -g vaelor /var/lib/vaelor
+fi
+install -d -m 2770 -o vaelor-workloads -g vaelor-jobs \
+  /var/lib/vaelor/workloads \
+  /var/lib/vaelor/backups /var/lib/vaelor/jobs
+# The GPU KV-prefix cache (SLOT_CACHE_DIR, vaelor/model_service_compose.py). The
+# model-service container bind-mounts it and is its only writer; pre-creating it
+# here as a workloads-owned dir stops the first GPU serve from relying on Docker
+# auto-creating a root-owned bind mount the executor could not then manage.
+install -d -m 2770 -o vaelor-workloads -g vaelor-jobs /var/lib/vaelor/kv-cache
+# Guarded web research (SearXNG) is brought up by ENABLING web research, not at
+# install time (#212, auto-start-on-enable). The
+# install prepares only the owned mount point here; enabling the service
+# (vaelor/web_research.py, /api/v2 web-research routes -> the workload executor)
+# deploys AND starts the one owned compose project - loopback-only,
+# digest-pinned, cap_drop, 512 MB cap - so a granted agent then fetches
+# end-to-end with no separate manual container deploy. The compose carries
+# restart:unless-stopped and the executor re-ensures it on start-up, so once
+# enabled it stays up automatically. The endpoint env below (vaelor-control-
+# plane / -workload-executor units) points at the loopback address the manager
+# binds, so no restart-config change is needed. Until web research is enabled,
+# agent_task_runner surfaces "web access is granted but the search service is
+# unavailable" (LESSONS #4/#11) rather than an empty answer that reads as "no
+# access".
+install -d -m 2770 -o vaelor-workloads -g vaelor-jobs \
+  /var/lib/vaelor/workloads/system-web-research
+# The GPU serving mode record (VD-125). WRITTEN by the workload executor - it is
+# the process that runs the mode switch - and READ by the control plane, which
+# needs it to say what the LLM Server is fronting and to size a cluster fit. The
+# state root gives write to the control plane's account alone, so an executor write there would fail
+# with EACCES on every appliance while passing every test (LESSONS pattern 13);
+# this directory is owned by the writer and setgid to the group the reader is a
+# member of, the same shape the job queue already uses.
+install -d -m 2770 -o vaelor-workloads -g vaelor-jobs \
+  /var/lib/vaelor/gpu-cluster-mode
+install -d -m 2770 -o vaelor -g vaelor-jobs /var/lib/vaelor/applications
+for application_db in /var/lib/vaelor/applications/applications.sqlite3*; do
+  [[ -e "${application_db}" ]] || continue
+  chown vaelor:vaelor-jobs "${application_db}"
+  chmod 0660 "${application_db}"
+done
+install -d -m 2770 -o vaelor -g vaelor-jobs /var/lib/vaelor/assistant
+# The app-capability registry (cross-service SQLite store class, LESSONS pattern
+# 13). Opened read/write by the control plane (vaelor) AND the workload executor
+# (vaelor-workloads) - a cluster.agent.deploy opens it - so, like assistant/ and
+# applications/ above, it is setgid to vaelor-jobs (a group both users are in) at
+# 2770. Created lazily at runtime it would take the first writer's private mode
+# and lock the other user out. It is WAL, so the reinstall loop below also
+# corrects its -wal/-shm siblings.
+install -d -m 2770 -o vaelor -g vaelor-jobs /var/lib/vaelor/integrations
+# The backup/restore schedule store and its export area (recovery/backups.sqlite3
+# + recovery/exports). Opened by the control plane (vaelor) and the root recovery
+# service; the runtime's own makedirs(mode=0o700, exist_ok=True) is order-
+# dependent and can lock one out. Pre-creating them 2770 vaelor-jobs makes that
+# makedirs a no-op that never downgrades the shared mode.
+install -d -m 2770 -o vaelor -g vaelor-jobs /var/lib/vaelor/recovery /var/lib/vaelor/recovery/exports
+# E' observability: Phoenix (the per-request trace collector) is part of the
+# appliance, so a fresh install comes up with it ENABLED - the executor's phoenix
+# autostart reconcile then starts the pre-pulled container on first boot. Written
+# only when ABSENT, so a re-install or upgrade never overrides an operator who
+# later turned it off. State shape mirrors vaelor/phoenix_state.py.
+install -d -m 0770 -o vaelor -g vaelor-jobs /var/lib/vaelor/phoenix
+if [[ ! -f /var/lib/vaelor/phoenix/state.json ]]; then
+  printf '{"enabled": true}' > /var/lib/vaelor/phoenix/state.json
+  chown vaelor:vaelor-jobs /var/lib/vaelor/phoenix/state.json
+  chmod 0660 /var/lib/vaelor/phoenix/state.json
+fi
+install -d -m 0770 -o vaelor -g vaelor \
+  /var/lib/vaelor/cluster /var/lib/vaelor/kvm
+install -d -m 0770 -o vaelor-vnc -g vaelor-vnc /var/lib/vaelor/vnc
+# The control plane's advisory record of which workers hold the household
+# trust bundle (tls_paths.FLEET_TRUST_STATE, VD-212). The control plane writes
+# it; the root authority service only reads it, to decide WHEN to promote a new
+# console certificate - never what to sign.
+install -d -m 0750 -o vaelor -g vaelor /var/lib/vaelor/tls
+install -d -m 0700 -o vaelor-secrets -g vaelor-credentials \
+  /var/lib/vaelor/credentials
+# /run/vaelor is Vaelor's runtime directory: the credential-broker and workload
+# sockets live there, and the root hardware bridge writes the LLM Server's
+# generated nginx config into it (`vaelor/llm_server_proxy.py`, via
+# `vaelor/runtime_paths.py` run_path - root-owned 0600, ephemeral by design so a
+# rotated proxy key never lands in the state root). /run is a tmpfs, so the
+# directory is gone after every reboot and something must recreate it.
+#
+# tmpfiles.d is that something, and it is deliberately NOT `RuntimeDirectory=` on
+# a unit. systemd DELETES a RuntimeDirectory when its unit stops, and this one
+# directory is shared: putting `RuntimeDirectory=vaelor` on the hardware bridge
+# would take the credential and workload sockets down with a bridge restart. A
+# tmpfiles.d entry is owned by no unit, is recreated at every boot by
+# systemd-tmpfiles-setup.service before any Vaelor service starts, and survives a
+# restart of any of them. `--create` below applies it in this run without waiting
+# for a reboot, so the install itself is turnkey.
+cat >/etc/tmpfiles.d/vaelor.conf <<'EOF'
+# Sticky bit (the leading 1 in 1770): /run/vaelor is group-writable so in-group
+# services can drop their own root-owned entries, but WITHOUT the sticky bit a
+# group member could rename/delete another owner's entry (e.g. move the root-owned
+# `agents/` subdir aside and plant a symlink). Sticky restricts rename/delete of an
+# entry to its owner; every /run/vaelor entry is root-created, so root and the
+# existing users (broker/workload sockets, proxy/balancer configs) are unaffected.
+d /run/vaelor 1770 root vaelor -
+# The LLM Server wake door's folder (`vaelor/llm_server_wake.py`): made here for
+# the control plane's account, so no other vaelor-group member can make it first.
+d /run/vaelor/llm-wake 0755 vaelor vaelor -
+EOF
+systemd-tmpfiles --create /etc/tmpfiles.d/vaelor.conf
+
+python3 -m venv /opt/vaelor/venv
+constraint_args=()
+constraint_file="${script_dir}/requirements-release.txt"
+if [[ ! -f "${constraint_file}" ]]; then
+  constraint_file="${script_dir}/../requirements-release.txt"
+fi
+if [[ -f "${constraint_file}" ]]; then
+  constraint_args=(--constraint "${constraint_file}")
+fi
+pip_args=(install "${constraint_args[@]}" --upgrade "${wheel}")
+reinstall_args=(install --no-deps --force-reinstall "${wheel}")
+if [[ -n "${wheelhouse}" ]]; then
+  [[ -d "${wheelhouse}" ]] || {
+    echo "The supplied wheelhouse directory is not readable." >&2
+    exit 1
+  }
+  pip_args=(
+    install --no-index --find-links "${wheelhouse}"
+    "${constraint_args[@]}" --upgrade "${wheel}"
+  )
+  reinstall_args=(
+    install --no-index --find-links "${wheelhouse}"
+    --no-deps --force-reinstall "${wheel}"
+  )
+fi
+/opt/vaelor/venv/bin/python -m pip "${pip_args[@]}"
+/opt/vaelor/venv/bin/python -m pip "${reinstall_args[@]}"
+# A reinstall removes only what the previous RECORD listed, so frontend files a
+# hot-patch or an older build left under vaelor/www_v2 survive it. Remove the
+# ones the installed RECORD does not list (vaelor/www_v2_orphans.py). Non-fatal:
+# when that list cannot be trusted it removes nothing and says why. -I keeps the
+# working directory off sys.path, so a clone or unpacked wheel there is not
+# what gets imported - or swept.
+/opt/vaelor/venv/bin/python -I -m vaelor.www_v2_orphans ||
+  echo "Stale frontend files under vaelor/www_v2 were not all cleared; see above." >&2
+
+# The workloads-writable handoff area the executor stages plans and wheels into
+# and the broker writes its result to (apply-plan.json, apply-result.json,
+# staged/). The retained ROLLBACK wheel does NOT live here - see below.
+install -d -m 2770 -o vaelor-workloads -g vaelor-jobs /var/lib/vaelor/upgrade
+# Retain the wheel that produced this install in a ROOT-ONLY location so the
+# appliance upgrade broker (vaelor/appliance_upgrade.py) can reinstall it on a
+# failed upgrade and re-verify its bytes at the privilege boundary before it
+# does. /var/lib/vaelor is root:vaelor and sticky, with write for the vaelor
+# account only through its ACL (the state-root layout below), so vaelor-workloads (only in group vaelor: r-x,
+# NO write) cannot create, rewrite, or unlink a child here, and the vaelor
+# account cannot rename or unlink this root-owned one -
+# the retained rollback target and its integrity record are tamper-proof, unlike
+# a copy left in the workloads-writable staging area. Non-fatal: a missing
+# snapshot only means the broker reports rollback-unavailable, never that the
+# install failed. Idempotent: install/printf overwrite on re-run.
+install -d -m 0700 -o root -g root /var/lib/vaelor/upgrade-retained
+install -d -m 0700 -o root -g root /var/lib/vaelor/upgrade-retained/current
+if [[ -f "${wheel}" ]] &&
+  current_version="$(/opt/vaelor/venv/bin/python -I -c 'import vaelor; print(vaelor.__version__)' 2>/dev/null)"; then
+  # Keep the wheel's real PEP 427 name: pip rejects a renamed wheel ("Invalid
+  # wheel filename"), so the rollback reinstall needs the original filename.
+  retained="/var/lib/vaelor/upgrade-retained/current/$(basename "${wheel}")"
+  if install -m 0600 -o root -g root "${wheel}" "${retained}"; then
+    retained_sha="$(sha256sum "${retained}" | cut -d' ' -f1)"
+    retained_bytes="$(stat -c '%s' "${retained}")"
+    printf '{"version":"%s","wheel":"%s","sha256":"%s","bytes":%s}\n' \
+      "${current_version}" "${retained}" "${retained_sha}" "${retained_bytes}" \
+      >/var/lib/vaelor/upgrade-retained/record.json
+    chown root:root /var/lib/vaelor/upgrade-retained/record.json
+    chmod 0600 /var/lib/vaelor/upgrade-retained/record.json
+  fi
+fi
+# Which BUILD is installed, not only which version (W4d-D8): the wheel's
+# sha256, size, build date and - for a release build - the commit, in a
+# root-owned, world-readable record the update panel compares against the
+# published release. Without it the panel refuses to reinstall a same-version
+# release rather than guess. Non-fatal: a failure leaves the panel saying the
+# build is unknown.
+if [[ -f "${wheel}" ]]; then
+  /opt/vaelor/venv/bin/python -I -m vaelor.build_provenance record "${wheel}" ||
+    echo "Could not record which Vaelor build was installed." >&2
+fi
+
+if [[ "${migrate}" -eq 1 ]]; then
+  for unit in "${legacy_units[@]}"; do
+    if systemctl is-active --quiet "${unit}"; then
+      legacy_active+=("${unit}")
+    fi
+  done
+  if ((${#legacy_active[@]})); then
+    systemctl stop "${legacy_active[@]}"
+  fi
+  /opt/vaelor/venv/bin/vaelor-migrate --apply \
+    --confirm migrate-control-plane-to-vaelor
+  migration_applied=1
+else
+  migration="$(
+    /opt/vaelor/venv/bin/vaelor-migrate
+  )"
+  if grep -q '"source_exists": true' <<<"${migration}"; then
+    echo "Legacy Pironman control-plane state was detected." >&2
+    echo "Re-run with --migrate after reviewing vaelor-migrate output." >&2
+    exit 1
+  fi
+fi
+
+chown -R vaelor-workloads:vaelor-jobs \
+  /var/lib/vaelor/workloads \
+  /var/lib/vaelor/backups /var/lib/vaelor/jobs
+# The state-root layout (ACC-063). The ROOT hardware bridge mounts the model
+# cache into GPU containers, and docker resolves a -v source when it runs, so
+# no account but root may be able to rename a folder on the way to one:
+# /var/lib/vaelor root:vaelor sticky with an ACL giving the vaelor account
+# write (`ls -ld` shows the ACL mask as drwxrwx--T+), the cache
+# root:vaelor-jobs 3770 (the executor still downloads into it), and hub, pull,
+# compile and serving-profiles real root folders (a link there is replaced).
+# Idempotent; the bridge re-checks the chain before every launch. A filesystem
+# without POSIX ACLs is left working as it was, and the report says GPU models
+# cannot be served from it until it takes them.
+layout_report="$(/opt/vaelor/venv/bin/python -I -m vaelor.state_root_layout)"
+if [[ "${layout_report%%$'\n'*}" != "anchored" ]]; then
+  echo "Warning: ${layout_report#*$'\n'}" >&2
+fi
+if [[ ! -e /var/lib/vaelor/models && ! -L /var/lib/vaelor/models ]]; then
+  # Only without the layout (no ACLs): the executor's download folder, as before.
+  install -d -m 2770 -o vaelor-workloads -g vaelor-jobs /var/lib/vaelor/models
+fi
+# The executor's own downloads keep its ownership, the vLLM folders root's. Only
+# the top of each tree is re-owned where the owner is already right, so a
+# multi-GB cache is not walked twice; nothing is followed through a link.
+if [[ -d /var/lib/vaelor/models && ! -L /var/lib/vaelor/models ]]; then
+  find /var/lib/vaelor/models -mindepth 1 -maxdepth 1 \
+    ! -name hub ! -name pull ! -name compile \
+    -exec chown -R vaelor-workloads:vaelor-jobs {} +
+  for vllm_dir in hub pull compile; do
+    if [[ -d "/var/lib/vaelor/models/${vllm_dir}" && ! -L "/var/lib/vaelor/models/${vllm_dir}" ]]; then
+      chown -R root:root "/var/lib/vaelor/models/${vllm_dir}"
+    fi
+  done
+fi
+install -d -m 2770 -o vaelor-workloads -g vaelor-jobs \
+  /var/lib/vaelor/backups/workloads \
+  /var/lib/vaelor/backups/cluster
+find /var/lib/vaelor/workloads -type d -exec chmod 2770 {} +
+find /var/lib/vaelor/workloads -type f \
+  \( -name 'compose.yaml' -o -name 'compose.yml' -o -name 'docker-compose.yml' \) \
+  -exec chmod 0660 {} +
+# The model store's two folders the ROOT hardware bridge works in on the
+# controller (VD-143): the pull records and the vLLM compile cache, root-owned
+# 0755 so no account but root can plant a link or a file in them. The recursive
+# chown above would otherwise hand them to the workloads account on every re-run.
+# The bridge converges them to this shape itself before each use
+# (vaelor/bridge_safe_fs.py ensure_root_directory), so this is the fresh-install
+# half of one rule rather than its only enforcement.
+models_store=/var/lib/vaelor/models
+for store_folder in pull compile; do
+  install -d -m 0755 -o root -g root "${models_store}/${store_folder}"
+done
+chown -R vaelor:vaelor-jobs /var/lib/vaelor/assistant
+chown -R vaelor:vaelor /var/lib/vaelor/cluster /var/lib/vaelor/kvm
+# Stores shared read/write between the control-plane (vaelor) and the workload
+# executor (vaelor-workloads): a cluster.agent.deploy runs in the executor and
+# opens the catalog, skills-library and agent-deployments stores the control
+# plane also writes. Group vaelor-jobs + group-rw so either service can open
+# them; both users are in vaelor-jobs (the agent-runtime vaelor-research is not).
+for shared_base in custom-agents mcp-catalog skills-library agent-deployments; do
+  for shared_db in /var/lib/vaelor/assistant/${shared_base}.sqlite3*; do
+    [[ -e "${shared_db}" ]] || continue
+    chown vaelor:vaelor-jobs "${shared_db}"
+    chmod 0660 "${shared_db}"
+  done
+done
+# The app-capability registry is the same cross-service class as the assistant
+# stores above: correct its group and mode on a reinstall over existing files
+# (the glob covers its -wal/-shm siblings) so the executor is never locked out.
+for integrations_db in /var/lib/vaelor/integrations/app-capability-registry.sqlite3*; do
+  [[ -e "${integrations_db}" ]] || continue
+  chown vaelor:vaelor-jobs "${integrations_db}"
+  chmod 0660 "${integrations_db}"
+done
+chown -R vaelor-vnc:vaelor-vnc /var/lib/vaelor/vnc
+chown -R vaelor-secrets:vaelor-credentials /var/lib/vaelor/credentials
+for state_file in \
+  /var/lib/vaelor/security.sqlite3 \
+  /var/lib/vaelor/totp.key \
+  /var/lib/vaelor/device-identity.json \
+  /var/lib/vaelor/system-update-state.json; do
+  [[ ! -e "${state_file}" ]] || chown vaelor:vaelor "${state_file}"
+done
+
+install -d -m 0700 -o root -g root /etc/vaelor/credentials
+if [[ ! -f /etc/vaelor/credentials/master-key.cred ]]; then
+  command -v systemd-creds >/dev/null || {
+    echo "systemd-creds is required for the encrypted credential broker." >&2
+    exit 1
+  }
+  head -c 32 /dev/urandom | systemd-creds encrypt \
+    --with-key=host --name=master.key - \
+    /etc/vaelor/credentials/master-key.cred
+  chmod 0600 /etc/vaelor/credentials/master-key.cred
+fi
+
+install -d -m 0750 -o root -g vaelor /opt/vaelor/tls
+# The console's certificate comes from the household authority (VD-212): a root
+# unique to this install, name-constrained to private addresses and local names,
+# whose key is systemd-creds encrypted to this host under /etc/vaelor/authority.
+# `ensure` creates the root (or keeps the one a keep-data uninstall left),
+# issues or keeps the console's certificate - every name and address this
+# machine answers on, the same identity the authority service renews - and adds
+# the root to this machine's own trust store.
+#
+# **Fail loud, never fall back.** The self-signed certificate this used to make
+# with openssl is not a fallback for a failed authority: a console that quietly
+# served one would leave every device the owner trusted the root on facing a
+# warning, and every worker pinned to the root refusing it (LESSONS 1).
+establish_household_authority() {
+  if [[ -n "${import_authority}" ]]; then
+    local -a import_args=(import "${import_authority}")
+    ((replace_authority)) && import_args+=(--replace)
+    if ! "${vaelor_venv_python}" -m vaelor.tls_authority "${import_args[@]}"; then
+      echo "The household certificate authority in ${import_authority} could not" \
+        "be imported; the console was not given a certificate. See the message" \
+        "above." >&2
+      return 1
+    fi
+  fi
+  if ! "${vaelor_venv_python}" -m vaelor.tls_authority ensure; then
+    echo "The household certificate authority could not create or keep the" \
+      "console's certificate, so the install stops here rather than serve a" \
+      "certificate no device trusts. See the message above." >&2
+    return 1
+  fi
+}
+establish_household_authority
+
+for unit in "${script_dir}"/systemd/vaelor-*.service; do
+  install -m 0644 "${unit}" "/etc/systemd/system/$(basename "${unit}")"
+done
+install -d -m 0755 /etc/systemd/system/tigervncserver@:1.service.d
+cat >/etc/systemd/system/tigervncserver@:1.service.d/vaelor-session-cleanup.conf <<'EOF'
+[Service]
+# GNOME moves desktop processes into the account's user manager. Ensure they
+# cannot survive a stopped VNC display and collide with the next session.
+#
+# **This list and `host_desktop.MANAGED_DESKTOP_USER` are the same rule in two
+# languages, and bash cannot import the constant.** It named `vaelor-desktop`
+# only while the appliance carried a second, pre-rename account - so the
+# cleanup terminated an account that did not exist, the real session survived
+# every stopped display, and the next browser desktop met the leftovers.
+# Found on the Pi 2026-08-11 (#166). #168 removed that second account rather
+# than adding to this list; `tests/test_host_desktop.py` compares the two
+# sides so neither can gain or lose a name alone.
+#
+# The `-` prefix makes a miss non-fatal, so naming an account that has never
+# logged in costs nothing and naming the present one is what matters.
+ExecStopPost=-/usr/bin/loginctl terminate-user vaelor-desktop
+EOF
+install -d -m 0755 /etc/systemd/system/vaelor-workload-executor.service.d
+install -d -m 0755 /etc/systemd/system/vaelor-workload-broker.service.d
+if getent group docker >/dev/null; then
+  cat >/etc/systemd/system/vaelor-workload-executor.service.d/docker.conf <<'EOF'
+[Service]
+SupplementaryGroups=vaelor-credentials docker
+EOF
+  cat >/etc/systemd/system/vaelor-workload-broker.service.d/docker.conf <<'EOF'
+[Service]
+SupplementaryGroups=vaelor docker
+EOF
+else
+  rm -f /etc/systemd/system/vaelor-workload-executor.service.d/docker.conf
+  rm -f /etc/systemd/system/vaelor-workload-broker.service.d/docker.conf
+fi
+install -d -m 0755 /etc/systemd/system/vaelor-control-plane.service.d
+# vaelor-bridge (the hardware bridge's socket group) is deliberately absent from
+# this drop-in and from the units: the control plane's and the executor's
+# membership comes from the `usermod -aG vaelor-bridge` above, which systemd
+# applies at every start through initgroups() for User=; SupplementaryGroups=
+# only adds to that list. A service started before the usermod picks the group
+# up at its next restart, which this install performs.
+hardware_groups=()
+for group in video render input gpio i2c spi; do
+  getent group "${group}" >/dev/null && hardware_groups+=("${group}")
+done
+if ((${#hardware_groups[@]})); then
+  printf '[Service]\nSupplementaryGroups=vaelor-jobs vaelor-credentials %s\n' \
+    "${hardware_groups[*]}" \
+    >/etc/systemd/system/vaelor-control-plane.service.d/hardware-groups.conf
+fi
+if [[ -e /dev/vcio ]] && getent group video >/dev/null; then
+  install -d -m 0755 /etc/udev/rules.d
+  cat >/etc/udev/rules.d/99-vaelor-rpi-vcio.rules <<'EOF'
+# Ubuntu may create /dev/vcio as root:root 0600. Grant only the standard
+# Raspberry Pi video group access for Vaelor's unprivileged PMIC adapter.
+KERNEL=="vcio", GROUP="video", MODE="0660"
+EOF
+  chgrp video /dev/vcio
+  chmod 0660 /dev/vcio
+  udevadm control --reload-rules
+fi
+if getent group gpio >/dev/null &&
+  compgen -G '/sys/class/thermal/cooling_device*/type' >/dev/null; then
+  install -d -m 0755 /etc/udev/rules.d
+  cat >/etc/udev/rules.d/99-vaelor-rpi-cpu-fan.rules <<'EOF'
+# Permit only the gpio group to adjust the Raspberry Pi PWM cooling state.
+SUBSYSTEM=="thermal", KERNEL=="cooling_device*", ATTR{type}=="pwm-fan", RUN+="/bin/chgrp gpio /sys%p/cur_state", RUN+="/bin/chmod 0664 /sys%p/cur_state"
+EOF
+  for type_path in /sys/class/thermal/cooling_device*/type; do
+    [[ "$(cat "${type_path}" 2>/dev/null || true)" == "pwm-fan" ]] || continue
+    state_path="${type_path%/type}/cur_state"
+    chgrp gpio "${state_path}"
+    chmod 0664 "${state_path}"
+  done
+  udevadm control --reload-rules
+fi
+cat >/etc/systemd/system/vaelor-control-plane.service.d/tls.conf <<'EOF'
+[Service]
+Environment=VAELOR_TLS_CERT=/opt/vaelor/tls/vaelor.crt
+Environment=VAELOR_TLS_KEY=/opt/vaelor/tls/vaelor.key
+Environment=VAELOR_SECURE_COOKIES=1
+EOF
+
+# hp-wmi-sensors ships with the distribution and is not loaded by default, and
+# nothing prompts anyone to load it. Without it a machine with three readable
+# fans and seven labelled board temperatures reports none of them, which is how
+# Vaelor came to tell an HP workstation it had no fans.
+#
+# Gated on the firmware actually offering the sensors: the WMI GUID is what
+# says so. Loading a module on a host whose firmware does not implement it
+# would create an empty hwmon node and turn "we did not look" into "we looked
+# and there is nothing", which is worse. Failure here is never fatal - the
+# reader degrades with a stated reason, and an appliance must not refuse to
+# install because an optional sensor driver would not load.
+install_wmi_sensors() {
+  local guid="5FB7F034-2C63-45e9-BE91-3D44E2C707E4"
+  case "$(uname -m)" in
+    x86_64 | amd64) ;;
+    *) return 0 ;;
+  esac
+  if ! ls /sys/bus/wmi/devices 2>/dev/null | grep -qiF "${guid}"; then
+    echo "This host's firmware does not publish the HP WMI sensor GUID; " \
+      "skipping hp-wmi-sensors."
+    return 0
+  fi
+  if ! modprobe hp-wmi-sensors 2>/dev/null; then
+    echo "hp-wmi-sensors could not be loaded; fan and board temperatures " \
+      "will report as unavailable with a reason." >&2
+    return 0
+  fi
+  install -d -m 0755 /etc/modules-load.d
+  printf '# Fans and board temperatures for HP hardware. See vaelor/wmi_sensors.py.\nhp-wmi-sensors\n' \
+    > /etc/modules-load.d/vaelor-hp-wmi-sensors.conf
+  echo "hp-wmi-sensors loaded and configured to load at boot."
+}
+install_wmi_sensors || true
+
+# The GPU memory pool (VD-161) is the owner's setting, chosen in the console
+# and applied only after they confirm it. The installer never creates,
+# changes or removes it: an install or a repair that silently resized the
+# memory a GPU may use would change what fits on the machine, and it takes a
+# restart nobody asked for to take effect. A file already here - written by
+# the console, or by hand before this setting existed - is kept exactly as it
+# is and shows up in the console as the current setting. The path is
+# `gpu_memory_pool.CONFIG_PATH`, retyped because bash cannot import it;
+# tests/test_gpu_memory_pool_installer.py compares the two.
+report_gpu_memory_pool() {
+  local setting="/etc/modprobe.d/vaelor-gpu-memory.conf"
+  if [[ -e "${setting}" ]]; then
+    echo "Found a GPU memory pool setting at ${setting}; keeping it as it is." \
+      "Change it in the console: Cluster, then Setup, then Machine settings."
+  fi
+}
+report_gpu_memory_pool || true
+
+# The neural processor publishes no utilisation or power through the kernel, so
+# `amd-smi` is the only path to either. Gated on the device actually being
+# bound, for the same reason as the WMI GUID check above: installing a vendor
+# tool on a host with no such device turns "we did not look" into "we looked
+# and there is nothing".
+#
+# Two things this deliberately does NOT do, both measured on the target
+# hardware rather than assumed:
+#
+# * **It never displaces an amd-smi already on PATH.** Ubuntu 26.04's own
+#   `amd-smi` (7.2.0-3, library 26.2.1) reports the entire `usage` block as the
+#   string "N/A" on a Ryzen AI Max and publishes no `apu_*` field at all. AMD's
+#   ROCm build (26.5.0) on the same machine in the same minute publishes every
+#   one of them. Replacing the second with the first would remove a working
+#   reading.
+# * **It does not add AMD's repository.** That build comes from
+#   repo.amd.com, and adding a third-party APT source changes what the
+#   appliance trusts. That is an owner's decision, not an installer's. Where
+#   only Ubuntu's build is available the NPU readings stay unavailable and the
+#   control plane says which of the two it is.
+install_amd_smi() {
+  case "$(uname -m)" in
+    x86_64 | amd64) ;;
+    *) return 0 ;;
+  esac
+  if command -v amd-smi >/dev/null 2>&1; then
+    echo "amd-smi is already installed; leaving it alone."
+    return 0
+  fi
+  local bound=0
+  for link in /sys/bus/pci/devices/*/driver; do
+    [[ -e "${link}" ]] || continue
+    case "$(basename "$(readlink -f "${link}")")" in
+      amdgpu | amdxdna) bound=1 ;;
+    esac
+  done
+  if ((bound == 0)); then
+    echo "No amdgpu or amdxdna device is bound on this host; skipping amd-smi."
+    return 0
+  fi
+  if ((skip_system_packages)); then
+    echo "Native-package install: amd-smi is left to the package manifest."
+    return 0
+  fi
+  # Reached only past the `command -v amd-smi` check above, so Vaelor is adding
+  # it; record before the install (a failed install leaves the marker naming a
+  # package dpkg does not have, which the teardown's purge skips harmlessly).
+  record_vaelor_packages amd-smi
+  if ! apt-get install -y amd-smi; then
+    echo "amd-smi is not available from this host's repositories; " \
+      "neural-processor activity and power will report as unavailable " \
+      "with a reason." >&2
+    return 0
+  fi
+  echo "amd-smi installed. If the neural-processor readings still report as" \
+    "unavailable, this build publishes no APU metrics for this device and" \
+    "AMD's ROCm build is the one that does."
+}
+install_amd_smi || true
+
+# The NPU Assistant runs on FastFlowLM (FLM), provisioned DIRECTLY into a
+# Vaelor-owned directory rather than out of the lemonade-server snap. The
+# portable FLM tarball is self-contained (it bundles its own XRT) and
+# Ubuntu-independent; `vaelor/flm_service.py` launches the `flm` wrapper this
+# unpacks at the fixed path /var/lib/vaelor/flm/flm.
+#
+# The GPU half is separate and below: prepull_serving_images places the container
+# images the GPU AI-Chat model and the LLM Server proxy serve from, and
+# install_rocm_gfx1151_runtime places the host ROCm that AMD's amd-smi build
+# needs for this part's APU telemetry. This step is the NPU half.
+#
+# Auto-provisioned per the owner's decision so a fresh Strix Halo box is
+# turnkey, and gated on an NPU actually being present (an accel device node),
+# because installing an NPU runtime on a host with no neural processor turns
+# "we did not look" into "we looked and there is nothing".
+#
+# Source stated plainly: the FastFlowLM portable Linux release the installed
+# Vaelor package pins (vaelor/npu_runtime_pin.py: the runtime and the model
+# package are pinned as ONE serving pair, because a package is converted for one
+# FastFlowLM - 1.0.3 refuses a 1.0.2 package, "version 1.0.2 < 1.0.3"), from
+# github.com/ROCm/FastFlowLM, verified against its pinned SHA-256 by
+# `python -I -m vaelor.npu_runtime_files install-runtime` - an unverified
+# runtime is never placed on the appliance. That places a runtime only where
+# there is none: a box on another FastFlowLM is moved WITH its model package by
+# the post-install step the model refresh runs after the health gate (VD-219),
+# the same step the console update runs, and never has its runtime replaced alone here.
+# Non-fatal on every failure - no network, a 404, a checksum mismatch - so an
+# appliance never fails to install because an optional AI runtime could not be
+# fetched. The NPU model itself is fetched by install_npu_model just below,
+# which reuses deploy/fetch-npu-model.sh to place it under
+# /var/lib/vaelor/flm/models.
+FLM_ROOT="/var/lib/vaelor/flm"
+install_fastflowlm() {
+  # G2 (VD-194): a cluster worker has no Assistant; its controller's serves.
+  if [[ -e "${WORKER_PROFILE_MARKER}" ]]; then
+    echo "This machine is a cluster worker; its controller's Assistant serves the" \
+      "cluster, so FastFlowLM is not installed here."
+    return 0
+  fi
+  case "$(uname -m)" in
+    x86_64 | amd64) ;;
+    *) return 0 ;;
+  esac
+  if ! compgen -G '/sys/class/accel/accel*' >/dev/null 2>&1; then
+    echo "No neural-accelerator device is present on this host; skipping FastFlowLM."
+    return 0
+  fi
+  # The runtime + model directory the bridge serves from, root:root 0755 so the
+  # unprivileged executor can traverse and probe it. fetch-npu-model.sh installs
+  # the NPU model into ${FLM_ROOT}/models.
+  install -d -m 0755 -o root -g root "${FLM_ROOT}" "${FLM_ROOT}/models"
+  # An offline native-package install must not reach out to GitHub: a pre-built
+  # image provisions the runtime at build time, so defer the network fetch the
+  # way the ROCm steps do.
+  if ((skip_system_packages)); then
+    echo "Native-package install: FastFlowLM is left to the image."
+    return 0
+  fi
+  # Idempotent: a box already on the pinned runtime is left alone, and says so.
+  if ! "${vaelor_venv_python}" -I -m vaelor.npu_runtime_files install-runtime; then
+    echo "The NPU Assistant will report as unavailable until FastFlowLM is" \
+      "installed at ${FLM_ROOT}." >&2
+    return 0
+  fi
+  # Run the wrapper once as root to materialize the XRT lib symlinks it creates
+  # on first run (lib/x86_64-linux-gnu). Non-fatal - the deploy step relaunches.
+  HOME=/root "${FLM_ROOT}/flm" version >/dev/null 2>&1 || true
+}
+install_fastflowlm || true
+
+# Give each installed NPU model folder ($@, one per model under the FLM models
+# dir) the modes the console needs to read it: every directory 0755, every file
+# 0644. The same two modes deploy/fetch-npu-model.sh's normalise_model_modes
+# sets on a fresh extraction (tests/test_npu_model_modes.py holds the two
+# together). Only the model folders: the models dir itself, the runtime and
+# everything else under ${FLM_ROOT} keep their modes. A symlinked folder is
+# skipped, and find does not follow a link below one.
+normalise_npu_model_modes() {
+  local folder
+  for folder in "$@"; do
+    folder="${folder%/}"
+    [[ -d "${folder}" && ! -L "${folder}" ]] || continue
+    find "${folder}" -type d -exec chmod 0755 {} + || true
+    find "${folder}" -type f -exec chmod 0644 {} + || true
+  done
+}
+
+# The NPU Assistant model (Qwen3.5-4B-NPU2, several GB) FastFlowLM serves. This is
+# the step that used to be a separate `deploy/fetch-npu-model.sh` run; folding it
+# in makes a fresh Strix Halo box turnkey (the owner's ask - one install command,
+# not two). It reuses that same script rather than duplicating its download so the
+# reassembly, SHA-256 verification and unpack stay in one place.
+#
+# Gated exactly like install_fastflowlm above (x86_64 with a neural-accelerator
+# device bound), so a host with no NPU never pulls several GB it cannot use. Opt out
+# with --without-npu-model to defer the large download. Idempotent: a model
+# already unpacked into the FLM models dir is left alone (its modes apart - see
+# normalise_npu_model_modes below). Skipped on an offline
+# native-package install (the image carries the model). NON-FATAL on every
+# failure - an appliance never fails to install because the optional model could
+# not be fetched; the NPU Assistant reports unavailable until it is installed.
+install_npu_model() {
+  # G2 (VD-194): a cluster worker has no Assistant, so no Assistant model.
+  if [[ -e "${WORKER_PROFILE_MARKER}" ]]; then
+    echo "This machine is a cluster worker; its controller's Assistant serves the" \
+      "cluster, so the NPU Assistant model is not fetched here."
+    return 0
+  fi
+  case "$(uname -m)" in
+    x86_64 | amd64) ;;
+    *) return 0 ;;
+  esac
+  if ((without_npu_model)); then
+    echo "Skipping the NPU Assistant model (--without-npu-model); install it" \
+      "later with deploy/fetch-npu-model.sh."
+    return 0
+  fi
+  if ! compgen -G '/sys/class/accel/accel*' >/dev/null 2>&1; then
+    echo "No neural-accelerator device is present on this host; skipping the NPU model."
+    return 0
+  fi
+  # Idempotent: any model already unpacked under the FLM models dir means the
+  # fetch is done - do not re-download several GB on a re-run. Matched on "a
+  # subdirectory exists" rather than the model name so a future model rename
+  # needs no change here.
+  if compgen -G "${FLM_ROOT}/models/*/" >/dev/null 2>&1; then
+    # Left alone except for its modes: a model fetched before v1.5's fix kept
+    # the release tar's 0770 folder, which the console cannot read ("Size
+    # unknown"), and re-running the installer is how that box is repaired.
+    normalise_npu_model_modes "${FLM_ROOT}"/models/*/
+    echo "An NPU Assistant model is already installed under ${FLM_ROOT}/models; leaving it alone."
+    return 0
+  fi
+  if ((skip_system_packages)); then
+    echo "Native-package install: the NPU model is left to the image."
+    return 0
+  fi
+  # No FLM wrapper means the runtime fetch above failed or was skipped; a model on
+  # disk would have nothing to serve it, so defer with the runtime.
+  if [[ ! -x "${FLM_ROOT}/flm" ]]; then
+    echo "FastFlowLM is not installed at ${FLM_ROOT}; skipping the NPU model." \
+      "Install FLM, then run deploy/fetch-npu-model.sh." >&2
+    return 0
+  fi
+  # The package is converted for one FastFlowLM (VD-219). A box on another one
+  # gets the runtime and its package together from the post-install step, so a
+  # package that would not run beside this runtime is not fetched alone.
+  if ! "${vaelor_venv_python}" -I -m vaelor.npu_runtime_files runtime-matches; then
+    echo "FastFlowLM at ${FLM_ROOT} is not the version this release's NPU model" \
+      "needs; the post-install step moves both together."
+    return 0
+  fi
+  # Reuse the standalone fetch script beside this installer (the repo layout is
+  # deploy/install-vaelor.sh + deploy/fetch-npu-model.sh, so it sits in
+  # ${script_dir}). It reassembles the split release parts, verifies the tar's
+  # SHA-256 and unpacks into FLM_MODELS_DIR. It honours VAELOR_REPO /
+  # VAELOR_RELEASE_TAG from the environment, the same names this installer's wheel
+  # download reads, so a custom repo/tag applies to both.
+  local fetch_script="${script_dir}/fetch-npu-model.sh"
+  if [[ ! -f "${fetch_script}" ]]; then
+    echo "deploy/fetch-npu-model.sh was not found beside the installer; the NPU" \
+      "Assistant will report as unavailable until the model is installed under" \
+      "${FLM_ROOT}/models." >&2
+    return 0
+  fi
+  # The size is the pinned package's own, read from the installed pin (LESSONS 5).
+  local npu_bytes npu_size="several GB"
+  npu_bytes="$("${vaelor_venv_python}" -I -m vaelor.npu_runtime_pin shell 2>/dev/null |
+    sed -n 's/^NPU_PACKAGE_BYTES=\([0-9][0-9]*\)$/\1/p')" || npu_bytes=""
+  if [[ -n "${npu_bytes}" ]]; then
+    npu_size="$(awk -v b="${npu_bytes}" 'BEGIN { printf "%.2f GiB", b / 1073741824 }')"
+  fi
+  echo "Fetching the NPU Assistant model (${npu_size}) - the large step; this can" \
+    "take a while on a slow link ..."
+  if FLM_MODELS_DIR="${FLM_ROOT}/models" bash "${fetch_script}"; then
+    echo "NPU Assistant model installed under ${FLM_ROOT}/models."
+  else
+    echo "The NPU Assistant model could not be fetched; the NPU Assistant will" \
+      "report as unavailable until deploy/fetch-npu-model.sh succeeds." >&2
+  fi
+}
+install_npu_model || true
+
+# --- The Mode A serving images, pre-pulled so the first deploy does not wait --
+#
+# Serving is a CONTAINER, not a host binary (VD-125). `vaelor/gpu_rocmfpx_service.py`
+# launches the GPU AI-Chat model in one of two self-contained ROCm images through
+# the root hardware bridge, and `vaelor/llm_server_proxy.py` fronts that loopback
+# model on the LAN with a stock nginx. Each launch already calls its own
+# `ensure_image` (inspect, then pull), so a missing image is never fatal - but on
+# a fresh box that first pull is several GB and it happens while an operator sits
+# watching a deploy. Pulling them here is what makes the first GPU AI-Chat deploy
+# and the first LLM Server enable start immediately, which is what "turnkey"
+# means for the serving path.
+#
+# The image references below are the ones those two modules hold - the modules
+# are the single home, and tests/test_installer_provisioning.py imports their
+# constants and asserts these strings match, so a reference that moves in the
+# module fails a test here rather than silently pre-pulling the wrong image.
+#
+# NOT pre-pulled, deliberately: the multi-node vLLM image (about 27 GB for the
+# default rocm/vllm 0.27 image, 26 GB for the older 0.22 image; sizes live in
+# `vaelor/vllm_images.py`). Mode B pulls it PER NODE as part of the
+# cluster deploy (`vaelor/gpu_pool_runtime.py` ensure_image), and a box that
+# never joins a GPU cluster must never carry tens of GB it cannot use. That per-node
+# pull is a plain `docker pull` behind one coarse step message - the
+# byte-accurate progress an operator watches during a cluster deploy is the
+# WEIGHTS pull (`vaelor/gpu_pull_program.py`), not the image pull. Every GPU node
+# needs that registry reachable at deploy time - see SUPPORTED_PLATFORMS.md.
+#
+# The bare ROCmFPX `llama-server` fork this step used to fetch from a third-party
+# GitHub release is GONE: nothing serves from it any more. The container carries
+# its own ROCm, and `vaelor/gpu_model_choice.py`'s capability gate already reads
+# the host binary and the host ROCm libs as INFORMATIONAL fields only - it gates
+# availability on a gfx1151 GPU plus a usable Docker, so a box with no
+# /var/lib/vaelor/engines/rocmfpx still reports the GPU model as available and
+# serves it (tests/test_gpu_model_choice.py pins exactly that). Dropping the
+# fetch saves an install-time download and the disk it sat on. An existing
+# install's copy is left alone: this step simply never writes there again, and a
+# data purge removes /var/lib/vaelor with everything under it.
+#
+# DEFINED here, beside the other AI provisioning steps; CALLED after the health
+# gate, next to vaelor-refresh-models - see the call site for why the longest
+# download in the installer must not stand in front of the gate.
+
+# The gfx target of every AMD compute device this host exposes, one per line.
+#
+# Read from the KFD topology, the signal the product already carries:
+# `vaelor/ssh_transport.py`'s GPU probe scans
+# /sys/class/kfd/kfd/topology/nodes/*/properties for `gfx_target_version`, takes
+# the first non-zero value, and records it on the node inventory under that name,
+# where `vaelor/cluster_capacity.py` and `vaelor/cluster_gpu_sizing.py` read it.
+# 110501 is gfx1151 (Strix Halo / Radeon 8060S) and 110500 is gfx1150 (Strix
+# Point); every other value is some other AMD part, and no value at all means no
+# KFD-visible AMD GPU.
+#
+# The control plane's own single-node gate (`vaelor/gpu_model_choice.py`
+# `names_a_gfx1151`) asks the same question of the accelerator NAME that DRM
+# discovery assigned, because it reads an inventory a shell script has no access
+# to. The two resolve to the same part; where they could ever disagree, the KFD
+# number is the one measured from the device.
+#
+# Prints nothing and succeeds when the topology is absent or unreadable, so the
+# caller decides what an empty answer means rather than this dying mid-install.
+host_gfx_targets() {
+  # The glob is a variable for ONE reason: so tests/test_installer_provisioning.py
+  # can point this function at a fixture tree and execute it for real rather than
+  # asserting on its source text. Nothing in the installer ever sets it, and the
+  # default is the real path.
+  local nodes_glob="${VAELOR_KFD_TOPOLOGY_GLOB:-/sys/class/kfd/kfd/topology/nodes/*/properties}"
+  local properties key value
+  # Unquoted on purpose - this is the glob expansion.
+  # shellcheck disable=SC2086
+  for properties in ${nodes_glob}; do
+    [[ -r "${properties}" ]] || continue
+    while read -r key value _rest; do
+      [[ "${key}" == "gfx_target_version" ]] || continue
+      [[ -n "${value}" && "${value}" != "0" ]] || continue
+      printf '%s\n' "${value}"
+    done <"${properties}"
+  done
+}
+
+# The pinned Telegraf release the CONTROLLER stages so it can ship the worker
+# telemetry agent to a lean cluster node (Phase E2b). The SOURCE OF TRUTH for the
+# version and the per-arch sha256 pins is vaelor/worker_telemetry_config.py
+# (TELEGRAF_VERSION / TELEGRAF_ARTIFACTS); they are mirrored here because the
+# installer bootstraps the appliance before the wheel is importable, exactly as
+# INFLUXDB_VERSION is. tests/test_installer_provisioning.py asserts the two
+# copies match, so a version or sha bump that touches only the Python fails CI
+# here rather than silently shipping a mismatched binary.
+TELEGRAF_VERSION="1.32.3"
+TELEGRAF_STAGING_DIR="/var/lib/vaelor/telegraf"
+stage_worker_telegraf() {
+  # Stage the pinned Telegraf tarballs the controller ships to lean workers. BOTH
+  # architectures are staged, not just this host's: an amd64 controller can
+  # enrol an arm64 worker and must have that worker's reviewed binary on hand.
+  # worker_telemetry_runtime.install refuses to ship a binary that is not staged
+  # here and re-verifies its sha before it leaves the controller, so a missing or
+  # corrupt stage degrades the OPTIONAL worker-telemetry feature rather than the
+  # appliance. This is therefore a warn-and-continue step, never a reason to abort
+  # a base install (cf. a wheel --no-deps deploy skipping a new dep: the feature
+  # honest-degrades until the artifact is present, VD-128 E2 follow-up).
+  if ((skip_image_pull)); then
+    echo "--skip-image-pull: the worker-telemetry Telegraf binaries are not" \
+      "staged. Enrolling a worker's telemetry agent needs them under" \
+      "${TELEGRAF_STAGING_DIR}; stage them (or re-run without --skip-image-pull)" \
+      "before installing worker telemetry."
+    return 0
+  fi
+  if ((skip_system_packages)); then
+    echo "Native-package install: the worker-telemetry Telegraf binaries are" \
+      "left to the image, as the serving images and FastFlowLM runtime are."
+    return 0
+  fi
+  install -d -m 0755 -o vaelor -g vaelor "${TELEGRAF_STAGING_DIR}"
+  local arch sha filename staged url tmp
+  for arch in amd64 arm64; do
+    # Per-arch sha256 pins, mirroring vaelor/worker_telemetry_config.py. A pin
+    # without a checksum is a floating tag by another name (#130); bump both in
+    # the same edit as TELEGRAF_VERSION.
+    case "${arch}" in
+      amd64) sha="260bc3170dbd6cce67575c1215a0b89b8447945106e2943d74e617d06b750c03" ;;
+      arm64) sha="f0d8ccae539afa04b171d5268dbab21eef58bc51b5437689e347619e2097c824" ;;
+    esac
+    filename="telegraf-${TELEGRAF_VERSION}_linux_${arch}.tar.gz"
+    staged="${TELEGRAF_STAGING_DIR}/${filename}"
+    # Idempotent: a re-run that already holds the verified tarball re-stages
+    # nothing (the same content-hashed skip the runtime uses when shipping).
+    if [[ -f "${staged}" ]] && echo "${sha}  ${staged}" | sha256sum --check --status; then
+      echo "Telegraf ${TELEGRAF_VERSION} (${arch}) already staged and verified."
+      continue
+    fi
+    url="https://dl.influxdata.com/telegraf/releases/${filename}"
+    tmp="$(mktemp --suffix=.tar.gz)"
+    echo "Staging pinned Telegraf ${TELEGRAF_VERSION} (${arch}) for worker telemetry."
+    if ! curl --fail --location --silent --show-error --max-time 300 -o "${tmp}" "${url}"; then
+      echo "Could not fetch Telegraf ${TELEGRAF_VERSION} (${arch}); worker" \
+        "telemetry for ${arch} workers stays unavailable until it is staged." >&2
+      rm -f "${tmp}"
+      continue
+    fi
+    if ! echo "${sha}  ${tmp}" | sha256sum --check --status; then
+      echo "Telegraf ${TELEGRAF_VERSION} (${arch}) failed its sha256 pin (#130);" \
+        "refusing to stage it. Worker telemetry for ${arch} workers stays" \
+        "unavailable." >&2
+      rm -f "${tmp}"
+      continue
+    fi
+    install -m 0644 -o vaelor -g vaelor "${tmp}" "${staged}"
+    rm -f "${tmp}"
+    echo "Staged ${staged}."
+  done
+}
+
+prepull_serving_images() {
+  if [[ "${with_docker}" == "no" ]]; then
+    # Truthful on BOTH callers of this flag. `--without-docker` is how an
+    # operator declines Docker on a fresh install, but it is ALSO what
+    # `maintain-vaelor.sh repair` passes unconditionally - on an appliance that
+    # already HAS Docker - so a message about the operator having declined it was
+    # a lie on every repair
+    # (LESSONS pattern 10: a message must describe what happened, not the one
+    # case its author had in mind). What is true on both paths is that this run
+    # does not provision Docker, so it does not pre-pull through it.
+    echo "Docker provisioning is skipped on this path; the serving container" \
+      "images are pulled on first use by the deploy that needs them."
+    return 0
+  fi
+  if ((skip_image_pull)); then
+    echo "--skip-image-pull: the serving container images are not" \
+      "pre-pulled. The first GPU AI-Chat deploy and the first LLM Server" \
+      "enable will pull them (several GB on a Strix Halo-class GPU box;" \
+      "only the ~30 MB proxy image elsewhere), and need registry access" \
+      "at that moment."
+    return 0
+  fi
+  # An offline native-package install must not reach a registry: a pre-built
+  # image carries what it needs (the inspect below then skips), so defer exactly
+  # as FastFlowLM, amd-smi and the gfx1151 ROCm runtime do.
+  if ((skip_system_packages)); then
+    echo "Native-package install: the serving container images are left to the image."
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker is not present; the serving container images are not pre-pulled."
+    return 0
+  fi
+  # The measured size of each image, on the appliance, 2026-09-05, rounded UP to
+  # whole MB the way `df -Pm` reports free space: 1.39 GB / 3.30 GB / 0.03 GB.
+  # Spelled once, here, and read by BOTH the disk preflight's arithmetic and the
+  # message it prints, so the check and the sentence can never disagree. The same
+  # figures are recorded beside the image constants in
+  # `vaelor/gpu_rocmfpx_service.py` and `vaelor/llm_server_proxy.py`, whose
+  # comments say to update this one when an image is re-pinned.
+  local -r mainline_image_mb=1400 fork_image_mb=3300 proxy_image_mb=30
+  # The Arize Phoenix trace collector (E' observability): ~1.55 GB, measured on
+  # the appliance 2026-09-09. Pinned beside its module constant PHOENIX_IMAGE
+  # (vaelor/phoenix_service.py) — the anti-drift guard in
+  # tests/test_installer_provisioning.py asserts the two match.
+  local -r phoenix_image_mb=1550
+  # Docker unpacks layers as it pulls, so the peak on disk exceeds the download.
+  local -r image_disk_headroom_mb=2048
+  # A wall-clock bound per pull, matching the model launch's own
+  # `DOCKER_PULL_TIMEOUT` (3600 s, `vaelor/gpu_rocmfpx_service.py`; the proxy
+  # module's bound is 600 s for its far smaller image, and the larger of the two
+  # is used here so one slow link cannot cut a multi-GB pull short). `docker
+  # pull` has no timeout of its own: without this an UNATTENDED install could sit
+  # on a half-open registry connection until someone noticed, which is the one
+  # failure mode a pre-pull must never introduce.
+  local -r pull_timeout_seconds=3600
+
+  # The nginx auth proxy is small and multi-arch, and the LLM Server can be
+  # enabled on any box that serves a local model, so it is pulled wherever Docker
+  # is. Phoenix (the trace collector) runs on the controller whatever the GPU is,
+  # so it is pulled here too rather than gated on gfx1151. The two ROCm serving
+  # images are multi-GB gfx1151 builds and are useless on any other part, so they
+  # are gated on the GPU ACTUALLY BEING a gfx1151 - not merely on "some amdgpu is
+  # bound", which would have made a Radeon RX desktop download 4.7 GB of kernels
+  # it can never run.
+  local images=(
+    "nginx:stable-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46"
+    "arizephoenix/phoenix:version-20.9.0@sha256:f8a80ff0ffb5ae394846baffaa0cc90b3add4e0f3515eaa968ca11079137bca4"
+  )
+  local sizes_mb=("${proxy_image_mb}" "${phoenix_image_mb}")
+  local gfx_targets target
+  gfx_targets="$(host_gfx_targets)"
+  local gfx1151=0
+  for target in ${gfx_targets}; do
+    case "${target}" in
+      110501 | 110500) gfx1151=1 ;;
+    esac
+  done
+  if ((gfx1151)); then
+    # The mainline image serves stock GGUFs (engine ""); the fork image serves
+    # the FP4 27B (engine "rocmfpx"). Which one a deploy uses is the model's
+    # catalog engine, so a turnkey box needs both present. Both refs are pinned
+    # by digest in `vaelor/gpu_rocmfpx_service.py` and repeated verbatim here;
+    # tests/test_installer_provisioning.py imports those constants and fails if
+    # these strings drift from them.
+    images+=(
+      "docker.io/kyuz0/amd-strix-halo-toolboxes:rocm-10.0@sha256:257986b5abdabc07cfb776143f3a690a5fb6dfe28e177f3096a37f1e227e1873"
+      "ghcr.io/julianmb/q38rocm:latest@sha256:62884d40be1f568142639f6f40734309c275f19acedb4873b2b8c8a420ab4a2c"
+    )
+    sizes_mb+=("${mainline_image_mb}" "${fork_image_mb}")
+  elif [[ -z "${gfx_targets}" ]]; then
+    echo "No AMD compute GPU is visible to this host (no gfx target in" \
+      "/sys/class/kfd/kfd/topology); pre-pulling only the LLM Server proxy" \
+      "image and skipping the two gfx1151 GPU serving images."
+  else
+    echo "This host's AMD GPU reports gfx target(s)" \
+      "${gfx_targets//$'\n'/, } - not gfx1151 (110501) or gfx1150 (110500);" \
+      "pre-pulling only the LLM Server proxy image and skipping the two" \
+      "gfx1151 GPU serving images, which cannot run on this part."
+  fi
+
+  # Idempotent: a re-run, or a box that already deployed once, inspects and moves
+  # on rather than re-pulling gigabytes. Doing the whole inspect pass FIRST is
+  # also what lets the disk preflight below size itself on what is actually
+  # missing, instead of on a set that is already on disk.
+  local index missing=() missing_mb=() required_mb=0
+  for index in "${!images[@]}"; do
+    if docker image inspect "${images[index]}" >/dev/null 2>&1; then
+      echo "Serving image already present: ${images[index]}"
+      continue
+    fi
+    missing+=("${images[index]}")
+    missing_mb+=("${sizes_mb[index]}")
+    required_mb=$((required_mb + sizes_mb[index]))
+  done
+  if ((${#missing[@]} == 0)); then
+    return 0
+  fi
+  required_mb=$((required_mb + image_disk_headroom_mb))
+
+  # Disk preflight. A pull that fills the Docker data root does not just fail
+  # itself - it leaves the daemon with no room for the deploy that follows, so a
+  # box that cannot hold the images is told so BEFORE several GB start arriving.
+  # Measured against the daemon's OWN data root, not /var/lib/docker by
+  # assumption, because a box with a separate model disk usually moves it.
+  local docker_root free_mb
+  docker_root="$(timeout 30 docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || docker_root=""
+  if [[ -z "${docker_root}" || ! -d "${docker_root}" ]]; then
+    docker_root="/var/lib/docker"
+  fi
+  free_mb="$(df -Pm "${docker_root}" 2>/dev/null | awk 'NR==2 {print $4}')"
+  # Fails OPEN: a free-space figure that cannot be read must not block a pull
+  # that would have worked. Only a figure that is present AND short skips.
+  if [[ "${free_mb}" =~ ^[0-9]+$ ]] && ((free_mb < required_mb)); then
+    echo "Only ${free_mb} MB is free on the Docker data root" \
+      "(${docker_root}), and the ${#missing[@]} missing serving image(s) need" \
+      "about ${required_mb} MB including ${image_disk_headroom_mb} MB of" \
+      "headroom for unpacking. Skipping the pre-pull rather than filling the" \
+      "disk; free some space and re-run the installer, or let the first deploy" \
+      "pull what it needs." >&2
+    return 0
+  fi
+
+  local image
+  for index in "${!missing[@]}"; do
+    image="${missing[index]}"
+    echo "Pre-pulling serving image ${image} (about ${missing_mb[index]} MB;" \
+      "this can take a while on a slow link) ..."
+    if timeout "${pull_timeout_seconds}" docker pull "${image}"; then
+      echo "Pre-pulled serving image: ${image}"
+    else
+      # Non-fatal, like every other optional AI provisioning step: the deploy
+      # that needs the image pulls it itself and reports the wait honestly.
+      echo "Could not pre-pull ${image} (or it exceeded the" \
+        "${pull_timeout_seconds}s bound); the first deploy that needs it will" \
+        "pull it then. That deploy waits on the download, and needs the" \
+        "registry reachable at that moment." >&2
+    fi
+  done
+}
+
+# A gfx1151 ROCm 7.x runtime at /opt/rocm - libamdhip64.so.7, libhipblas.so.3,
+# librocblas.so.5, libhipblaslt.so.1, libhsa-runtime64.so.1, libamd_comgr.so.3,
+# librocsolver.so.0, plus the gfx1151 rocBLAS Tensile kernels.
+#
+# This is NO LONGER a serving prerequisite. Serving moved into the container,
+# which carries its own ROCm (the pre-pull step above), so the GPU AI-Chat model
+# runs on a box with no /opt/rocm at all. What still reads /opt/rocm is host-side
+# telemetry and inventory, and both are real:
+#   * `vaelor/platforms/accelerators.py` prefers /opt/rocm/bin/amd-smi over the
+#     PATH build, because Ubuntu's own amd-smi answers N/A for every APU metric
+#     on a Ryzen AI Max while AMD's ROCm build publishes them (VD-040). Without
+#     it the neural-processor activity and power readings go blank; and
+#   * `vaelor/platforms/graphics_software.py` reports the installed ROCm version
+#     in the inventory panel, and reports honest absence when there is none.
+# So the step stays, gated and non-fatal as before - a box that skips it loses
+# the APU metrics and the reported ROCm version, not the ability to serve.
+#
+# --- A deliberate, documented APT-source deviation --------------------------
+# The InfluxDB and amd-smi steps above both refuse to add an APT source on
+# principle - InfluxDB: "We do NOT add an APT source ... nothing is written to
+# /etc/apt/sources.list*, so the appliance's standing trust on every future
+# `apt upgrade` is unchanged. Adding a sources.list entry would be an owner's
+# decision; this is not that." - and each fetches one pinned, sha-verified
+# .deb instead. ROCm cannot be provisioned that way: it is a ~5.4 GB tree of
+# many interdependent packages with transitive ROCm deps, not a single .deb, so
+# per-.deb sha pinning is not workable. AMD's official signed repo is the
+# supported gfx1151 channel and is exactly how the reference Z2 was
+# provisioned, so this step DOES add that one source - deliberately, and
+# narrowly, without weakening the posture those steps protect:
+#   * signed-by a keyring only, and the key is BUNDLED with the installer
+#     (deploy/amdrocm-keyring.gpg) and PINNED by fingerprint
+#     (${ROCM_GFX1151_KEY_FINGERPRINT}), verified before use, never added to the
+#     global apt trust store. It is not fetched: repo.amd.com serves the package
+#     repo but returns 403 for every signing-key path, so a key URL is not an
+#     option; the bundled key is AMD's public package-signing key, and pinning
+#     it by fingerprint is stronger than trusting a URL fetch anyway;
+#   * the package versions are PINNED (=${ROCM_GFX1151_VERSION}) and
+#     `apt-mark hold`-held, so a background `apt upgrade` cannot shift the AI
+#     stack under the appliance - the same "held" discipline the pinned FLM
+#     runtime uses;
+#   * on ANY failure the source and keyring this step added are removed again,
+#     so a failed provision leaves the appliance's standing apt trust exactly
+#     as it was, and GPU AI-Chat degrades honestly. The NPU path is never
+#     blocked (called with `|| true`, and every branch `return`s non-fatally).
+# Gated on an amdgpu binding, exactly like the GPU serving images above: this
+# runtime reads an AMD GPU's own telemetry, so it is useless on a host that has
+# none.
+# The tested pin. AMD rotates its ROCm point releases and removes the old one's
+# dependency closure, so this WILL go stale; when it does, the install step falls
+# back to the current 7.14.x automatically (see install_rocm_gfx1151_runtime).
+# Bump this to re-pin a freshly tested build - it was 7.14.0-3 until AMD shipped
+# 7.14.1-0 and deleted the 7.14.0-3 deps, which stranded a fresh install.
+ROCM_GFX1151_VERSION="7.14.1-0"
+# The primary fingerprint of AMD's public package-signing key that signs this
+# repo (the key that Release.gpg verifies against). The bundled keyring
+# deploy/amdrocm-keyring.gpg must match this before it is trusted.
+ROCM_GFX1151_KEY_FINGERPRINT="D0F004A0025A1145C7807FCD0701EAC4D5E02107"
+
+# Remove the AMD source and keyring this step installs, so a failed or aborted
+# provision never leaves a standing third-party APT source on the appliance
+# (the InfluxDB principle). The refresh drops the now-orphaned cached index.
+rocm_gfx1151_remove_source() {
+  rm -f /etc/apt/sources.list.d/amdrocm.list /etc/apt/keyrings/amdrocm.gpg
+  apt-get update >/dev/null 2>&1 || true
+}
+
+install_rocm_gfx1151_runtime() {
+  case "$(uname -m)" in
+    x86_64 | amd64) ;;
+    *) return 0 ;;
+  esac
+  # Idempotent: a working gfx1151 ROCm runtime is a real libamdhip64.so.7 AND a
+  # gfx1151 rocBLAS Tensile kernel directory (the two halves libggml-hip.so
+  # needs). Probe both before spending ~5.4 GB re-installing.
+  #
+  # Mirror the GPU service's resolver exactly (gpu_rocmfpx_service.py
+  # resolve_rocm_lib_dir), which accepts the runtime under EITHER /opt/rocm/lib
+  # OR any /opt/rocm/core-*/lib (candidate #3, added because AMD's packages can
+  # land libamdhip64.so.7 under core-7.14/lib with no top-level /opt/rocm/lib).
+  # A probe that only checked /opt/rocm/lib would false-negative on that layout,
+  # re-install 5.4 GB every run, and disagree with the resolver about whether
+  # the runtime is present.
+  local rocm_hip_lib rocm_gfx_dir
+  rocm_hip_lib="$(find /opt/rocm \
+    \( -path '/opt/rocm/lib/libamdhip64.so.7' \
+    -o -path '/opt/rocm/core-*/lib/libamdhip64.so.7' \) \
+    -print -quit 2>/dev/null)"
+  rocm_gfx_dir="$(find /opt/rocm -type d -path '*rocblas/library/gfx1151' \
+    -print -quit 2>/dev/null)"
+  if [[ -n "${rocm_hip_lib}" && -n "${rocm_gfx_dir}" ]]; then
+    echo "A gfx1151 ROCm 7.x runtime is already present at /opt/rocm" \
+      "(${rocm_hip_lib}); leaving it alone."
+    return 0
+  fi
+  local bound=0
+  for link in /sys/bus/pci/devices/*/driver; do
+    [[ -e "${link}" ]] || continue
+    case "$(basename "$(readlink -f "${link}")")" in
+      amdgpu) bound=1 ;;
+    esac
+  done
+  if ((bound == 0)); then
+    echo "No amdgpu GPU is bound on this host; skipping the gfx1151 ROCm runtime."
+    return 0
+  fi
+  # An offline native-package install must not add a repo or reach the network:
+  # a pre-built image carries /opt/rocm (the probe above then skips), so defer
+  # exactly as FastFlowLM, amd-smi and the serving-image pre-pull do.
+  if ((skip_system_packages)); then
+    echo "Native-package install: the gfx1151 ROCm runtime is left to the image."
+    return 0
+  fi
+  for tool in gpg apt-get apt-mark; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+      echo "${tool} is unavailable; without a gfx1151 ROCm runtime at" \
+        "/opt/rocm the neural-processor activity and power readings and the" \
+        "reported ROCm version stay unavailable with a reason. Serving is" \
+        "unaffected - the model container carries its own ROCm." >&2
+      return 0
+    fi
+  done
+  # Select AMD's repo path for THIS host's Ubuntu release from /etc/os-release
+  # rather than hardcoding ubuntu2604. AMD publishes packages-multi-arch per
+  # release as ubuntuXXYY (Ubuntu 26.04 -> ubuntu2604, 24.04 -> ubuntu2404).
+  # Only Ubuntu is published on this channel; a non-Ubuntu Debian-family host,
+  # or an Ubuntu with no VERSION_ID, has no AMD match and degrades honestly.
+  # (ID/VERSION_ID were sourced from /etc/os-release near the top of this run.)
+  if [[ "${ID:-}" != "ubuntu" || -z "${VERSION_ID:-}" ]]; then
+    echo "AMD's gfx1151 ROCm channel publishes for Ubuntu only; this host is" \
+      "'${ID:-unknown} ${VERSION_ID:-}', which AMD does not match. The" \
+      "neural-processor activity and power readings and the reported ROCm" \
+      "version stay unavailable with a reason; serving is unaffected." >&2
+    return 0
+  fi
+  local ubuntu_code="ubuntu${VERSION_ID//./}"
+  local keyring="/etc/apt/keyrings/amdrocm.gpg"
+  local list="/etc/apt/sources.list.d/amdrocm.list"
+  local repo_line
+  repo_line="deb [arch=amd64 signed-by=${keyring}] https://repo.amd.com/rocm/packages-multi-arch/${ubuntu_code} stable main"
+  # The pinned gfx1151 runtime + BLAS packages that land /opt/rocm and its
+  # gfx1151 rocBLAS Tensile kernels, plus their transitive ROCm deps. Held
+  # below so a background upgrade cannot move them.
+  local packages=(
+    "amdrocm-runtime7.14=${ROCM_GFX1151_VERSION}"
+    "amdrocm-base7.14=${ROCM_GFX1151_VERSION}"
+    "amdrocm-core7.14-gfx1151=${ROCM_GFX1151_VERSION}"
+    "amdrocm-blas7.14-gfx1151=${ROCM_GFX1151_VERSION}"
+  )
+  install -d -m 0755 /etc/apt/keyrings
+  # signed-by keyring only, from the BUNDLED key beside this installer - never
+  # a URL (repo.amd.com returns 403 for every signing-key path). Resolve it via
+  # ${script_dir}, the same way the wheel constraints and systemd/ payload are
+  # found. VERIFY its primary fingerprint against the pinned constant before
+  # trusting it; a missing file or a mismatch honest-degrades rather than
+  # placing an unverified key.
+  local bundled_key="${script_dir}/amdrocm-keyring.gpg"
+  if [[ ! -r "${bundled_key}" ]]; then
+    echo "The bundled AMD ROCm key (${bundled_key}) is missing; the" \
+      "neural-processor activity and power readings and the reported ROCm" \
+      "version stay unavailable with a reason; serving is unaffected." >&2
+    return 0
+  fi
+  # Defense in depth: a plain "does the pinned fp appear anywhere" grep would
+  # pass a decoy keyring of [attacker-primary + genuine-AMD-as-a-subkey], or any
+  # keyring with an extra key, and apt then trusts EVERY key in a signed-by
+  # keyring. So assert two things from gpg's colon output: the keyring holds
+  # EXACTLY ONE public key (one `pub` record), AND the pinned fingerprint is
+  # that key's PRIMARY fpr (the `fpr` record immediately after the `pub`), not a
+  # subkey's. Anything else honest-degrades without installing the key.
+  local rocm_key_colons rocm_key_pub_count rocm_key_primary_fpr
+  rocm_key_colons="$(gpg --show-keys --with-colons "${bundled_key}" 2>/dev/null)"
+  rocm_key_pub_count="$(awk -F: '$1=="pub"{n++} END{print n+0}' \
+    <<<"${rocm_key_colons}")"
+  rocm_key_primary_fpr="$(awk -F: \
+    '$1=="pub"{want=1; next} $1=="fpr" && want{print $10; want=0}' \
+    <<<"${rocm_key_colons}")"
+  if [[ "${rocm_key_pub_count}" != "1" ||
+    "${rocm_key_primary_fpr}" != "${ROCM_GFX1151_KEY_FINGERPRINT}" ]]; then
+    echo "The bundled AMD ROCm key is not a single key whose primary" \
+      "fingerprint is the pinned ${ROCM_GFX1151_KEY_FINGERPRINT} (saw" \
+      "${rocm_key_pub_count} public key(s)); refusing an unverified key. The" \
+      "neural-processor activity and power readings and the reported ROCm" \
+      "version stay unavailable with a reason; serving is unaffected." >&2
+    return 0
+  fi
+  # Already dearmored/binary - copy it as-is (no dearmor needed).
+  if ! cp -f "${bundled_key}" "${keyring}"; then
+    echo "The verified AMD ROCm key could not be installed; the" \
+      "neural-processor activity and power readings and the reported ROCm" \
+      "version stay unavailable with a reason; serving is unaffected." >&2
+    rocm_gfx1151_remove_source
+    return 0
+  fi
+  chmod 0644 "${keyring}"
+  printf '%s\n' "${repo_line}" >"${list}"
+  if ! apt-get update; then
+    echo "AMD's ROCm repo for ${ubuntu_code} could not be reached; the" \
+      "neural-processor activity and power readings and the reported ROCm" \
+      "version stay unavailable with a reason; serving is unaffected." >&2
+    rocm_gfx1151_remove_source
+    return 0
+  fi
+  if ! apt-get install -y "${packages[@]}"; then
+    # **Pin drift, made self-healing.** AMD rotates the ROCm point release and
+    # DELETES the old one's dependency closure from the repo, so a hard
+    # `=${ROCM_GFX1151_VERSION}` becomes unsatisfiable the day they ship
+    # 7.14.(N+1) - the top-level metapackage lingers at the pinned version while
+    # its `amdrocm-sysdeps/-llvm/...` deps only exist at the new one, and apt
+    # reports "unmet dependencies" rather than a working install. This bit a
+    # fresh install once already. The package NAMES fix the 7.14 MINOR series
+    # (amdrocm-*7.14 / -gfx1151), which is the series this appliance is tested
+    # on, so a retry WITHOUT the exact point release installs the current
+    # 7.14.x - self-healing, still inside the compatible minor, and held below so
+    # it cannot drift after. A pin bump is still preferred (it re-pins a tested
+    # build); this is the safety net so a fresh install is never blocked waiting
+    # for one.
+    echo "Pinned gfx1151 ROCm ${ROCM_GFX1151_VERSION} was not installable (AMD" \
+      "likely rotated the point release); retrying with the current 7.14.x ..." >&2
+    local unpinned=()
+    for pkg in "${packages[@]}"; do unpinned+=("${pkg%%=*}"); done
+    if ! apt-get install -y "${unpinned[@]}"; then
+      echo "No installable gfx1151 ROCm 7.14.x was found in AMD's repo; the" \
+        "neural-processor activity and power readings and the reported ROCm" \
+        "version stay unavailable with a reason; serving is unaffected." >&2
+      rocm_gfx1151_remove_source
+      return 0
+    fi
+  fi
+  # Hold the ROCm packages against a background `apt upgrade` - the pinned FLM
+  # runtime's version discipline, in apt. The signed, version-pinned source stays (apt
+  # needs it to satisfy the held versions); the hold is what keeps the AI stack
+  # from drifting. Non-fatal: a failed hold does not undo a good install.
+  #
+  # Hold the whole RESOLVED dependency closure, not just the four top-level
+  # packages: the install pulled a tree of transitive ROCm deps, and leaving any
+  # of them unheld lets a background upgrade float it and skew the stack. Derive
+  # the closure from what is actually installed in the amdrocm-*/rocm-*
+  # namespace (dpkg-query over the installed set), which is exactly the packages
+  # the four above dragged in. Fall back to the four top-level names if the
+  # query yields nothing.
+  local -a rocm_installed=()
+  local pkg
+  while IFS= read -r pkg; do
+    [[ -n "${pkg}" ]] && rocm_installed+=("${pkg}")
+  done < <(dpkg-query -W -f='${Package}\n' 'amdrocm-*' 'rocm-*' 2>/dev/null |
+    sort -u)
+  if ((${#rocm_installed[@]})); then
+    apt-mark hold "${rocm_installed[@]}" >/dev/null 2>&1 || true
+  else
+    apt-mark hold "${packages[@]}" >/dev/null 2>&1 || true
+  fi
+  # Report the version actually installed, which is the pin on the common path
+  # and the current 7.14.x when the fallback ran - not the pin constant, which
+  # would misreport after a rotation.
+  local rocm_actual
+  rocm_actual="$(dpkg-query -W -f='${Version}' amdrocm-runtime7.14 2>/dev/null)"
+  echo "gfx1151 ROCm ${rocm_actual:-${ROCM_GFX1151_VERSION}} runtime installed at" \
+    "/opt/rocm from AMD's official signed repo (${ubuntu_code}) and held against" \
+    "apt upgrades. It is the ROCm build whose amd-smi publishes this" \
+    "part's APU metrics."
+}
+
+# Non-fatal - a failure degrades honestly (blank APU metrics) and the NPU path is
+# never blocked. The serving-image pre-pull is NOT called here: it runs after the
+# health gate, beside vaelor-refresh-models, for the reason recorded there.
+install_rocm_gfx1151_runtime || true
+
+# If SunFounder's HAT runtime is present (offer accepted, or already on the
+# appliance), take its hardware daemon and mask its competing web dashboard so
+# only Vaelor's control plane serves (#207).
+neutralize_sunfounder_control_plane
+
+systemctl daemon-reload
+systemctl enable "${vaelor_units[@]}"
+systemctl restart "${vaelor_units[@]}"
+# The probe below is `--silent` WITHOUT `--show-error`: the first pass always
+# runs before the control plane has bound its port, and curl's own
+# "(7) Failed to connect" on that expected miss read as an install error on
+# every cold install. The one line that follows says what the wait is; a real
+# failure is reported by the deadline check with the units' status.
+echo "Waiting for the control plane to answer on https://127.0.0.1:34001 ..."
+health_deadline=$((SECONDS + 300))
+healthy_samples=0
+while ((SECONDS < health_deadline)); do
+  services_healthy=1
+  for unit in "${vaelor_units[@]}"; do
+    if systemctl is-active --quiet "${unit}"; then
+      continue
+    fi
+    # Optional platform adapters use explicit systemd conditions. An unmet
+    # condition is a truthful unsupported capability, not a failed service.
+    [[ "$(systemctl show --property=ConditionResult --value "${unit}")" == "no" ]] ||
+      services_healthy=0
+  done
+  if [[ "${services_healthy}" -eq 1 ]] &&
+    [[ -S /run/vaelor/credentiald.sock ]] &&
+    [[ -S /run/vaelor/workloadd.sock ]] &&
+    curl --fail --silent --insecure --max-time 5 \
+      https://127.0.0.1:34001/api/v2/auth/status >/dev/null 2>&1; then
+    healthy_samples=$((healthy_samples + 1))
+    if ((healthy_samples >= 3)); then
+      break
+    fi
+  else
+    healthy_samples=0
+  fi
+  sleep 2
+done
+if ((healthy_samples < 3)); then
+  echo "Vaelor did not remain healthy for three consecutive checks." >&2
+  systemctl status --no-pager "${vaelor_units[@]}" >&2 || true
+  exit 1
+fi
+
+# Does the console's certificate verify against the household root, the way a
+# device that trusts the root will check it (VD-212)? The health gate above
+# uses --insecure on purpose - it asks whether Vaelor serves, not whether the
+# chain is right - so this is the one place the chain is actually verified.
+#
+# Non-fatal and said plainly either way: a console that serves is a working
+# install, and an existing install migrating to the household root keeps
+# serving its previous certificate until every worker has the root, which is
+# expected and not a failure.
+check_household_chain() {
+  if curl --fail --silent --show-error --max-time 5 \
+    --cacert "${household_public_root}" \
+    https://127.0.0.1:34001/api/v2/auth/status >/dev/null; then
+    echo "The console's certificate verifies against this install's household" \
+      "certificate authority."
+  elif compgen -G "${household_pending_dir}/*" >/dev/null; then
+    echo "The console still serves its previous certificate: the one the" \
+      "household authority issued is waiting until every worker trusts the" \
+      "authority, and is then swapped in without a restart."
+  else
+    echo "Warning: the console's certificate did not verify against the" \
+      "household certificate authority (${household_public_root}). Vaelor is" \
+      "serving; browsers will warn until this is fixed. Check" \
+      "journalctl -u vaelor-tls-authority." >&2
+  fi
+  return 0
+}
+check_household_chain
+# Re-apply this release's serving settings to models already deployed.
+#
+# The upgrade replaced the code that decides the engine digest, the prompt-cache
+# bound, the KV window and the container limit, and left every *deployed*
+# compose at the previous release's rendering. Without this an install lands and
+# the appliance goes on serving the old configuration, which is how a Pi ran an
+# alpha-29 compose while everything reported alpha 35 (VD-081).
+#
+# **After the health gate, never before.** The executor performs the deploy, and
+# an executor still on the previous release re-renders the previous release's
+# compose while reporting success. Ordering is the correctness argument.
+#
+# The same call queues a refresh (Unload, then Load) for every SERVING cluster
+# GPU deployment whose units this release renders differently, and prints which
+# deployments it refreshed or skipped and why (VD-169): a pooled vLLM deployment
+# is no compose, and before this it kept the previous release's units.
+#
+# Non-fatal: a refresh that cannot run must not fail an install that otherwise
+# succeeded. It reports, and the next redeploy picks it up.
+#
+# VD-217: `vaelor-refresh-models --apply`, run as root, first runs this
+# release's root build steps (`vaelor/post_install_steps.py`, the ONE list:
+# fetch and build the vLLM attention change (VD-215), build Vaelor's HIP
+# expert kernels and the 4-bit guesser (VD-216), then remove retired versions)
+# and only then queues the reloads, so the reloads serve what was built. The
+# console's Update Vaelor runs the same command from its root broker, so an
+# update reaches the state this installer does. Each step is bounded, prints
+# its outcome, and never fails the install: a box without a build serves with
+# the honest fallback and says why, and the root bridge builds it at the
+# first model start that needs it. Do not call the steps here as well - a
+# second list is how the two update paths drifted (LESSONS 6).
+if /opt/vaelor/venv/bin/vaelor-refresh-models --apply; then
+  :
+else
+  echo "Deployed models could not be refreshed; redeploy them (or Unload, then Load a cluster GPU deployment) from the UI to pick up this release's serving settings." >&2
+fi
+
+# Pre-pull the Mode A serving images (defined far above, beside the other AI
+# provisioning steps, so the whole story is in one place).
+#
+# **After the health gate, never before**, for the same reason
+# vaelor-refresh-models is: this is the longest-running optional step in the
+# installer - several GB over whatever link the appliance has - and everything an
+# operator actually installed for is already true by the time it starts. Run
+# earlier it would put a multi-GB download in front of the health gate, so an
+# unattended install could sit for an hour before anyone learned whether Vaelor
+# came up at all; run here the console is already serving and this is a warm-up
+# the operator can walk away from or interrupt. It is idempotent, so an interrupt
+# costs only the layers not yet fetched, and each pull is bounded.
+#
+# Non-fatal: a registry that cannot be reached must never fail an install that
+# otherwise succeeded - the deploy that needs the image pulls it itself.
+prepull_serving_images || true
+
+# Stage the pinned Telegraf worker-telemetry binaries the same way, and for the
+# same reason it is safe here: the console is already serving, the fetch is
+# bounded and idempotent, and it is non-fatal - a controller that could not
+# stage them enrols workers fine and only worker telemetry waits until they are
+# staged (VD-128 E2 follow-up).
+stage_worker_telegraf || true
+
+if [[ "${migrate}" -eq 1 ]]; then
+  for unit in "${legacy_units[@]}"; do
+    systemctl disable "${unit}" >/dev/null 2>&1 || true
+  done
+fi
+migration_complete=1
+trap - ERR
+
+# The one address the owner is told to use: the installed-at line and the
+# trust commands both print it (a bare host name may not resolve on their PC).
+#
+# Derived once, in Python, from the console certificate's own addresses
+# (tls_trust_commands.console_address_for, VD-133 1.5.5 #1/#2): the address the
+# default route leaves from when the certificate names it, else a private one it
+# names that is not Docker's or a VM's bridge. Never `hostname -I`'s first word,
+# which is in no promised order and can be 172.17.0.1 - except as the fallback
+# when Python cannot answer, so the install still says where it is.
+console_address_for_owner() {
+  local derived=""
+  derived="$("${vaelor_venv_python}" -m vaelor.tls_trust_commands --print-address 2>/dev/null)" ||
+    derived=""
+  if [[ -n "${derived}" ]]; then
+    echo "${derived}"
+  else
+    echo "$(hostname -I | awk '{print $1}'):34001"
+  fi
+}
+console_address="$(console_address_for_owner)"
+echo "Vaelor is installed at https://${console_address}/v2/"
+
+# How to trust this console on the owner's own computers and phones (VD-212):
+# the root's fingerprint and one command per OS that downloads the root from
+# the console and installs nothing unless the fingerprint matches. The
+# installer cannot do this itself - those devices are not this machine's to
+# change. Printed last so it is what is on screen when the install ends;
+# non-fatal, because the console's Trust this Vaelor panel shows the same.
+#
+# Also saved on this machine (VD-133 1.5.5 #2): a browser that refuses the
+# certificate cannot open the console's panel, and the terminal this ran in may
+# be long closed. The printed text names the file (tls_paths.TRUST_STEPS, its one
+# home; the household authority's pass keeps it current after a console update)
+# and the command that prints it again.
+print_trust_commands() {
+  echo
+  if ! "${vaelor_venv_python}" -m vaelor.tls_trust_commands --address "${console_address}" \
+    --save; then
+    echo "The trust commands could not be printed here; open the console's" \
+      "Settings > Connections > Trust this Vaelor for the same commands." >&2
+  fi
+  return 0
+}
+print_trust_commands
+
+# The one and only reboot, dead last: after every step above has succeeded (the
+# health gate would have exited non-zero otherwise) and after
+# neutralize_sunfounder_control_plane has masked SunFounder's dashboard. It fires
+# only when the HAT runtime was installed *this run* and so wrote device-tree
+# overlays that need a reboot to load. No HAT install (declined, or not a Pi)
+# means no reboot at all (#207). This is why SunFounder's own mid-install reboot
+# prompt is suppressed above - a reboot here, never there.
+if ((hat_installed)); then
+  echo "The Pironman HAT overlays were written and need one reboot to load."
+  if ((unattended)); then
+    echo "Vaelor install complete; rebooting to activate the HAT overlays."
+    reboot
+  else
+    printf "Reboot now to activate the Pironman HAT? [Y/n] "
+    reboot_answer="y"
+    read -r reboot_answer </dev/tty 2>/dev/null || reboot_answer="y"
+    # [Y/n] default-yes: empty (just Enter) reboots, and so does "y"/"yes" (any
+    # case). A naive user typing "yes" must not fall through to no-reboot and
+    # leave the overlays unloaded (review UX #207).
+    if [[ "${reboot_answer:-y}" =~ ^([Yy]([Ee][Ss])?)?$ ]]; then
+      reboot
+    else
+      echo "Reboot before the enclosure controls will work."
+    fi
+  fi
+fi

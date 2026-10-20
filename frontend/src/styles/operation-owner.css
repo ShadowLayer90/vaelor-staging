@@ -1,0 +1,358 @@
+/*
+ * The operation card (VD-200, the AppsSetupActivity board's "Current setup
+ * operation"): the current step over its state pill, the progress line and a
+ * bar only while work runs, the attention notice, Correct and continue, the
+ * result, the links row (open the app, Activity evidence, support reference)
+ * and the actions at the right. Shared by every surface that owns an operation.
+ */
+
+.operation-owner {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.operation-owner .ui-card__body {
+  position: relative;
+  display: grid;
+  gap: 14px;
+}
+
+/* An idle feedback region stays in the page so a later message is announced,
+   but takes no room in the card until it has something to say. */
+.operation-owner__feedback[aria-hidden="true"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  border: 0;
+}
+
+.operation-owner__header,
+.operation-owner__progress-heading,
+.operation-owner__links,
+.operation-owner__actions {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.operation-owner__header {
+  justify-content: space-between;
+}
+
+/* No step reported: the pill alone sits at the right, as the board draws it. */
+.operation-owner__header > .operation-owner__state:only-child { margin-left: auto; }
+
+.operation-owner__step {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.operation-owner__eyebrow {
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+}
+
+.operation-owner__step strong,
+.operation-owner__identity {
+  overflow-wrap: anywhere;
+}
+
+.operation-owner__step strong {
+  color: var(--text-primary);
+  font-size: var(--font-size-ui);
+  font-weight: 500;
+}
+
+.operation-owner__state {
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+.operation-owner__progress {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.operation-owner__progress-heading {
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+}
+
+.operation-owner__progress-heading span:first-child {
+  color: var(--text-primary);
+  font-size: var(--font-size-ui-sm);
+  font-weight: 500;
+}
+
+.operation-owner__progress-heading span + span {
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+}
+
+.operation-owner__progress-bar {
+  width: 100%;
+  height: 6px;
+  overflow: hidden;
+  appearance: none;
+  background: var(--meter-track);
+  border: 0;
+  border-radius: var(--radius-pill);
+  accent-color: var(--accent);
+}
+
+.operation-owner__progress-bar::-webkit-progress-bar { background: var(--meter-track); border-radius: var(--radius-pill); }
+.operation-owner__progress-bar::-webkit-progress-value { background: var(--accent); border-radius: var(--radius-pill); }
+.operation-owner__progress-bar::-moz-progress-bar { background: var(--accent); border-radius: var(--radius-pill); }
+
+.operation-owner__progress small {
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+  line-height: 1.5;
+}
+
+.operation-owner__error code {
+  font-family: var(--font-family-data);
+  overflow-wrap: anywhere;
+}
+
+/* VD-133 1.5.5 #4: a failure the server says is resolved or dismissed - a
+   standing note, not an alert, wrapping like the error it replaces. */
+.operation-owner__settled {
+  overflow-wrap: anywhere;
+}
+
+.operation-owner__correction,
+.operation-owner__result {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.operation-owner__correction {
+  padding: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-row);
+  border-radius: 10px;
+}
+
+.operation-owner__correction > div:first-child { display: grid; gap: 2px; }
+
+.operation-owner__correction h3,
+.operation-owner__correction p,
+.operation-owner__result h3,
+.operation-owner__result p {
+  margin: 0;
+}
+
+.operation-owner__correction h3,
+.operation-owner__result h3 {
+  color: var(--text-primary);
+  font-size: var(--font-size-ui);
+  font-weight: 500;
+}
+
+.operation-owner__correction p,
+.operation-owner__result p {
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+}
+
+.operation-owner__correction .ui-button-wrap { justify-self: start; }
+
+.operation-owner__result summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.operation-owner__result summary {
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+}
+
+.operation-owner__result pre {
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--font-family-data);
+  font-size: var(--font-size-ui-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.operation-owner__fields {
+  min-width: 0;
+  max-width: 360px;
+  display: grid;
+  gap: var(--space-4);
+}
+
+.operation-owner__correction-values {
+  margin: 0;
+  display: grid;
+  gap: 1px;
+  overflow: hidden;
+  background: var(--border-kv);
+  border: 1px solid var(--border-kv);
+  border-radius: 10px;
+}
+
+.operation-owner__correction-values > div {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: 10px 12px;
+  background: var(--bg-kv);
+}
+
+.operation-owner__correction-values dt {
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+}
+
+.operation-owner__correction-values dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  font-family: var(--font-family-data);
+  font-size: var(--font-size-ui-xs);
+  overflow-wrap: anywhere;
+}
+
+.operation-owner__artifacts {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  font-size: var(--font-size-ui-sm);
+}
+
+.operation-owner__artifacts li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.operation-owner__artifacts small {
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+}
+
+.operation-owner__links {
+  align-items: center;
+  gap: var(--space-2) var(--space-5);
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+}
+
+.operation-owner__links a {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  font-size: var(--font-size-ui-sm);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.operation-owner__links a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.operation-owner__links .ui-button {
+  min-height: 36px;
+  padding: 0 4px;
+  font-size: var(--font-size-ui-sm);
+}
+
+.operation-owner__identity code {
+  font-family: var(--font-family-data);
+}
+
+.operation-owner__actions {
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+}
+
+.operation-owner__actions .ui-button {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: var(--font-size-ui-sm);
+}
+
+.operation-owner__actions .ui-button-wrap {
+  max-width: 100%;
+}
+
+.operation-owner__discard-confirmation {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 10px 12px;
+  color: var(--text-secondary);
+  font-size: var(--font-size-ui-xs);
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
+}
+
+.operation-owner__discard-confirmation .ui-button-wrap {
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .operation-owner__header,
+  .operation-owner__progress-heading {
+    display: grid;
+  }
+
+  .operation-owner__state {
+    justify-self: start;
+  }
+
+  .operation-owner__header > .operation-owner__state:only-child { margin-left: 0; }
+
+  .operation-owner__correction-values > div {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+
+  .operation-owner__actions { justify-content: flex-start; }
+
+  .operation-owner__links a,
+  .operation-owner__links .ui-button,
+  .operation-owner__actions .ui-button {
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .operation-owner__progress-bar {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .operation-owner__correction,
+  .operation-owner__result,
+  .operation-owner__discard-confirmation {
+    color: CanvasText;
+    background: Canvas;
+    border-color: CanvasText;
+  }
+
+  .operation-owner__links a:focus-visible {
+    outline-color: Highlight;
+  }
+}
