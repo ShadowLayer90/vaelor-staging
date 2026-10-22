@@ -1,5 +1,14 @@
 # Change log
 
+## 1.5.5 Release Candidate 5
+
+Release Candidate 4 with one uninstall fix:
+
+- **Removing Vaelor completely now always removes its release scripts.** A
+  full uninstall run as a system service from Vaelor's own copy of the script
+  left `/usr/lib/vaelor` (the release scripts and older wheels) behind. It is
+  now deleted directly; if it cannot be, the uninstall says so and how to finish.
+
 ## 1.5.5 Release Candidate 4
 
 The fourth staging build. It closes the list of smaller issues found while

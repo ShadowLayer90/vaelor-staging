@@ -34,6 +34,11 @@ worker_profile_marker="${VAELOR_WORKER_PROFILE_MARKER:-/etc/vaelor/worker-profil
 # controller's and never finish the worker's bare-OS purge (review, VD-133
 # 1.5.5 #8). Overridable for the same ONE reason as the paths above.
 worker_purge_record="${VAELOR_WORKER_PURGE_RECORD:-/usr/lib/vaelor/release/worker-purge}"
+# The tree the installer's release snapshot lives in (release_snapshot.RELEASE_DIR
+# is its release/ folder), deleted last by a bare-OS uninstall. Overridable for
+# the same ONE reason as the paths above, and only ever to an absolute path
+# whose last part is `vaelor` (remove_release_snapshot refuses anything else).
+release_root="${VAELOR_RELEASE_ROOT:-/usr/lib/vaelor}"
 # The record a worker's uninstall leaves beside the worker marker
 # (worker_profile.UNINSTALLED_PATH, retyped because bash cannot import it;
 # tests/test_worker_uninstalled.py compares the two): positive evidence for its
@@ -287,15 +292,35 @@ remove_vaelor_containers() {
 
 # The installer leaves a release snapshot (this script included) under
 # /usr/lib/vaelor, outside every tree the teardown removes, so it survives to
-# run the teardown; it goes last. If THIS invocation is running from it, the
-# delete is handed to a detached process so bash does not lose its own file
-# mid-read; a copy run from elsewhere (e.g. the recovery daemon's /run copy)
-# removes it directly.
+# run the teardown; it goes last, deleted here and now, before this script
+# exits - never handed to a process that outlives it. It used to be: run from
+# inside the snapshot, the delete went to a detached `setsid ... sleep 2; rm`
+# child, and a systemd unit kills every process in its cgroup the moment its
+# main process exits (KillMode=control-group; setsid leaves the session, not
+# the cgroup), so a teardown run with systemd-run left the snapshot, old wheels
+# included (VD-133 1.5.5 rc5, found live 2026-10-21).
+#
+# Deleting the tree this script runs from is safe: bash reads the script
+# through a descriptor it already holds, and unlinking a file leaves an open
+# descriptor readable; and the whole uninstall is one top-level `case`, which
+# bash has read to its `esac` before running any of it. A snapshot still there
+# afterwards is said, never assumed gone (LESSONS 1), and only a directory
+# named vaelor is ever deleted.
+release_snapshot_left=0
 remove_release_snapshot() {
-  if [[ "${script_dir}" == /usr/lib/vaelor/* ]]; then
-    setsid bash -c 'sleep 2; rm -rf /usr/lib/vaelor' >/dev/null 2>&1 &
-  else
-    rm -rf /usr/lib/vaelor
+  if [[ "${release_root}" != /?*/vaelor || "${release_root}" =~ (^|/)\.\.?(/|$) ]]; then
+    echo "Did not delete the release snapshot: ${release_root} is not an" \
+      "absolute path to a directory named vaelor." >&2
+    release_snapshot_left=1
+    return 0
+  fi
+  # Its status is not trusted either way - the check below is the answer -
+  # and a failure must not end the script under `set -e` before saying so.
+  rm -rf "${release_root}" || true
+  if [[ -e "${release_root}" || -L "${release_root}" ]]; then
+    echo "Could not remove Vaelor's release snapshot (${release_root}, old" \
+      "wheels included). Finish with: rm -rf ${release_root}" >&2
+    release_snapshot_left=1
   fi
 }
 
@@ -329,6 +354,7 @@ bare_os_summary() {
   for package in "$@"; do
     package_gone "${package}" || kept+=("${package}")
   done
+  ((release_snapshot_left)) && kept+=("the release snapshot ${release_root}")
   if printf '%s\n' "$@" | grep -qxF docker.io && package_gone docker.io; then
     went+=("Docker and containerd with every container image")
   fi
@@ -1147,8 +1173,8 @@ for item in items:
           done < <(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 || true)
           getent group docker >/dev/null && groupdel docker || true
         fi
-        # The release snapshot, last (remove_release_snapshot says why) - the
-        # worker-purge record with it.
+        # The release snapshot, last and before this script exits
+        # (remove_release_snapshot says why) - the worker-purge record with it.
         remove_release_snapshot
         rm -f "${worker_purge_record}"
         bare_os_summary "${os_packages[@]}"
