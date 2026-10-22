@@ -1,5 +1,18 @@
 # Change log
 
+## 1.5.5 Release Candidate 6
+
+Release Candidate 5 with one fix found by its fresh install:
+
+- **Adding a worker clears model serving an earlier controller left on it.**
+  A worker re-added to a rebuilt controller kept running the old controller's
+  model, holding its GPU memory, with nothing in the console to stop it; the new
+  controller then said a model "won't fit". The join plan now says it stops and
+  removes model serving the controller has no deployment for on that machine,
+  and the join does it. Your apps and the downloaded model files stay.
+- **A model service whose file is gone but which is still running is stopped,**
+  not reported as already removed.
+
 ## 1.5.5 Release Candidate 5
 
 Release Candidate 4 with one uninstall fix:

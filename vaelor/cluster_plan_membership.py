@@ -19,6 +19,14 @@ from .gpu_memory_pool import pool_left_note
 from .cluster_service_state import STATEFUL_DRAIN_ACK
 from .worker_profile_state import uninstalled_node_ids
 
+#: The join plan's line for `worker_left_serving.remove_left_serving`.
+LEFT_SERVING_STEP = (
+    "Stop and remove any model serving left on the machine that this controller has "
+    "no deployment for there, such as an earlier controller's: Vaelor's own model "
+    "servers, their gates and model download jobs. Your apps and the downloaded "
+    "model files stay."
+)
+
 #: The refusal both removal plans give for an id that names no enrolled node.
 _WORKER_NOT_FOUND = "The worker was not found."
 
@@ -128,6 +136,9 @@ def plan_join_node(
         "If it was forced out of a cluster, remove the old entries this "
         "controller holds under the machine's hostname.",
         "Apply Vaelor node labels for architecture and memory-aware placement.",
+        # Owner 2026-10-22 (VD-133 1.5.5 rc5): `worker_left_serving`. "If
+        # any", because the plan reads nothing on the machine; true either way.
+        LEFT_SERVING_STEP,
     ]
     if readding:
         # Owner 2026-10-21: Re-add of a machine Vaelor was uninstalled on.

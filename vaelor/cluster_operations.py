@@ -66,6 +66,7 @@ from .cluster_network import private_controller_ipv4
 from .runtime_paths import data_path
 from .worker_profile_state import uninstalled_node_ids
 from .worker_profile_probe import docker_on_machine
+from .worker_left_serving import LEFT_SERVING, remove_left_serving
 
 
 class ClusterOperations(ClusterAgentOperationsMixin):
@@ -261,7 +262,10 @@ class ClusterOperations(ClusterAgentOperationsMixin):
         self.store.update_node(
             node["id"], state="joined", role="worker", labels=stored_labels
         )
-        return {**result, "node_id": node["id"], "labels": stored_labels}
+        # Owner 2026-10-22 (VD-133 1.5.5 rc5): model serving an earlier
+        # controller left goes; this controller's own stays. Never raises.
+        left = remove_left_serving(self, node, transport)
+        return {**result, "node_id": node["id"], "labels": stored_labels, LEFT_SERVING: left}
 
     #: Architectures Vaelor runs cluster workloads on at all. Membership here
     #: does not mean two of them may share a cluster — VD-031 keeps one

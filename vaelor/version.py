@@ -1,1 +1,1 @@
-__version__ = '1.5.5rc5'
+__version__ = '1.5.5rc6'

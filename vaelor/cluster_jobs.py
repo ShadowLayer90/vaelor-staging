@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Dict
 
 from .cluster_node_removal import removal_message
@@ -23,6 +24,30 @@ from .gpu_model_library import pull_job_message, remove_job_message
 from .gpu_pool_replicas import with_serving_notes
 from .jobs import JobStore
 from .worker_profile_job import JOINED_REASON, queue_profile_job, run_profile_job
+from .worker_left_serving import LEFT_SERVING, left_serving_message
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _node_name(operations: ClusterOperations, result: Dict[str, Any]) -> str:
+    """The joined machine's name for a sentence, or its id when it cannot be read."""
+    try:
+        node = operations.store.get_node(str(result["node_id"]))
+    except Exception:  # noqa: BLE001 - a name for a sentence never fails a finished join
+        LOGGER.warning("Could not read node %s's name for the join message", result["node_id"])
+        node = None
+    if isinstance(node, dict) and node.get("name"):
+        return str(node["name"])
+    return str(result["node_id"])
+
+
+def _sentences(*parts: str) -> str:
+    """``parts`` joined as sentences: one full stop between each, never two."""
+    text = ""
+    for part in (part for part in parts if part):
+        text = part if not text else "{}{} {}".format(text, "" if text.endswith(".") else ".", part)
+    return text
 
 
 def execute_cluster_job(
@@ -53,9 +78,13 @@ def execute_cluster_job(
         # VD-194 P2: the join ends by queuing the worker's profile, which runs
         # next (one job at a time) and lays the telemetry agent down with it.
         queue_profile_job(store, result["node_id"], JOINED_REASON)
+        # Owner 2026-10-22 (VD-133 1.5.5 rc5): what the join removed of an
+        # earlier controller's serving, or could not, is said here with the rest.
+        left = result.get(LEFT_SERVING)
+        left_note = left_serving_message(_node_name(operations, result), left) if left else ""
         return store.finish(
             job["id"], state="healthy",
-            message="Worker joined and placement labels applied" + (". " + pool_note if pool_note else ""),
+            message=_sentences("Worker joined and placement labels applied", pool_note, left_note),
             result={**result, "gpu_memory_pool": pool_note},
         )
     if job_type == "cluster.node.availability":
