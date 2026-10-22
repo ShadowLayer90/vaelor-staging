@@ -34,6 +34,15 @@ worker_profile_marker="${VAELOR_WORKER_PROFILE_MARKER:-/etc/vaelor/worker-profil
 # controller's and never finish the worker's bare-OS purge (review, VD-133
 # 1.5.5 #8). Overridable for the same ONE reason as the paths above.
 worker_purge_record="${VAELOR_WORKER_PURGE_RECORD:-/usr/lib/vaelor/release/worker-purge}"
+# The record a worker's uninstall leaves beside the worker marker
+# (worker_profile.UNINSTALLED_PATH, retyped because bash cannot import it;
+# tests/test_worker_uninstalled.py compares the two): positive evidence for its
+# controller that Vaelor was uninstalled here on purpose, so the controller
+# stops repairing the machine until the owner re-adds or removes it (owner
+# 2026-10-21, VD-194, VD-133 1.5.5 #16). A keep-data uninstall keeps it; a
+# purge removes it with the rest of /etc/vaelor. Overridable for the same ONE
+# reason as the paths above.
+worker_uninstalled_record="${VAELOR_WORKER_UNINSTALLED_RECORD:-/etc/vaelor/worker-uninstalled.json}"
 # The record that Vaelor turned on GNOME Remote Login (system RDP): written by
 # host_desktop.configure_rdp, removed by host_desktop.disable_rdp
 # (host_desktop.RDP_ENABLED_MARKER, retyped because bash cannot import it;
@@ -118,7 +127,8 @@ projects, the GPU AI-Chat model, the LLM Server proxy, the Phoenix trace
 collector and each custom agent's gate. It also stops and removes any
 GPU-cluster (Mode B) serving this node runs - the vLLM servers, Ray workers and
 gates, the model-pull oneshots, and the balancer container - so no LLM is left
-answering on the LAN after Vaelor is gone. Vaelor's containers are found by
+answering on the LAN after Vaelor is gone - and names each serving and
+model-download unit it stopped. Vaelor's containers are found by
 Vaelor's owner label (io.vaelor.owner), or by name when unlabelled and outside
 any Compose project, so a cluster worker, which has no Vaelor runtime, finds
 its own and an owner's Compose app is never taken. A worker node's own
@@ -172,7 +182,13 @@ Swarm stays, together with the cluster record that describes it, so a reinstall
 finds both.
 
 On a cluster worker a controller enrolled (/etc/vaelor/worker-profile.json),
---purge-data is a bare-OS purge (below), Docker included: it returns the
+every uninstall first records that Vaelor was uninstalled
+(/etc/vaelor/worker-uninstalled.json), so the controller stops repairing the
+machine and its card offers Re-add and Remove; nothing is put back until the
+owner chooses. A keep-data uninstall keeps that record; a purge removes it with
+/etc/vaelor, and the controller then reads the machine as wiped.
+
+On such a worker, --purge-data is a bare-OS purge (below), Docker included: it returns the
 worker to bare OS, purging what the installed-by-vaelor marker records - or,
 on a worker without one, the full stack the installer can add - and Docker
 always, so every container, image and volume on the worker goes. A worker
@@ -610,20 +626,41 @@ case "${operation}" in
       echo "Nothing changed. Use the exact confirmation shown in --help." >&2
       exit 1
     }
-    # Stop Vaelor's own services FIRST. The hardware bridge and the executor
-    # both watch the containers they launched and relaunch one that disappears,
+    # Read before anything below changes the machine: whether a Vaelor
+    # controller enrolled this machine as a cluster worker.
+    enrolled_worker=0
+    if [[ -e "${worker_profile_marker}" || -e "${worker_purge_record}" ]]; then
+      enrolled_worker=1
+    fi
+    # A worker leaves its controller a record that Vaelor was uninstalled here
+    # (owner 2026-10-21, VD-133 1.5.5 #16): without it the controller's
+    # 15-minute check read the missing agent as drift and reinstalled it twice
+    # within minutes of the owner's uninstall. Written truly first - before
+    # any service is stopped or file removed (round 1 review) - so a check
+    # that reads the machine mid-uninstall already sees it; it only adds one
+    # small file under /etc/vaelor. A record that could not be written is
+    # said: the controller would then put the worker software back.
+    if ((enrolled_worker)); then
+      uninstall_mode="keep-data"
+      ((purge)) && uninstall_mode="purge-data"
+      if ! { mkdir -p "$(dirname "${worker_uninstalled_record}")" &&
+        printf '{"uninstalled_at": %s, "mode": "%s"}\n' "$(date +%s)" \
+          "${uninstall_mode}" >"${worker_uninstalled_record}"; } 2>/dev/null; then
+        echo "Could not record on this machine that Vaelor was uninstalled" \
+          "(${worker_uninstalled_record}), so its cluster controller may put the" \
+          "worker software back. Remove this machine on the controller's Fleet" \
+          "page, or re-add it there." >&2
+      fi
+    fi
+    # Stop Vaelor's own services next, before anything else is removed. The
+    # hardware bridge and the executor both watch the containers they
+    # launched and relaunch one that disappears,
     # so a container removed while they still run comes straight back and then
     # holds the image the purge below is meant to remove. The teardown itself
     # runs as a transient unit owned by pid 1 when the console launched it
     # (appliance_recovery.perform_uninstall), so stopping every Vaelor unit here
     # cannot stop this script.
     systemctl disable --now "${units[@]}" >/dev/null 2>&1 || true
-    # Read before anything below removes /etc/vaelor: whether a Vaelor
-    # controller enrolled this machine as a cluster worker.
-    enrolled_worker=0
-    if [[ -e "${worker_profile_marker}" || -e "${worker_purge_record}" ]]; then
-      enrolled_worker=1
-    fi
     # A worker's data purge returns it to bare OS, Docker included (owner,
     # VD-133 1.5.5 #8): a worker holds only what its controller provisioned, and
     # the 1.5.4 purge left the ZBook's /usr/lib/vaelor, its record and a running
@@ -659,12 +696,35 @@ case "${operation}" in
       cluster_units+=("$(basename "${unit_file}")")
     done
     if ((${#cluster_units[@]})); then
-      systemctl disable --now "${cluster_units[@]}" >/dev/null 2>&1 || true
+      cluster_stopped=1
+      systemctl disable --now "${cluster_units[@]}" >/dev/null 2>&1 || cluster_stopped=0
       for unit in "${cluster_units[@]}"; do
         rm -f "${systemd_dir}/${unit}"
       done
       rm -f /etc/vaelor/vllm/*.conf
       systemctl daemon-reload
+      # Named, every mode (owner 2026-10-21, VD-133 1.5.5 #16): the rc2
+      # keep-data uninstall stopped a worker's replicated model and printed
+      # only the telemetry agent. Serving and model downloads are named apart.
+      serving_units=()
+      pull_units=()
+      for unit in "${cluster_units[@]}"; do
+        case "${unit}" in
+          vaelor-model-pull-*) pull_units+=("${unit}") ;;
+          *) serving_units+=("${unit}") ;;
+        esac
+      done
+      if ((cluster_stopped)); then
+        cluster_verb="Stopped and removed"
+      else
+        cluster_verb="Removed (systemd did not confirm each one stopped)"
+      fi
+      if ((${#serving_units[@]})); then
+        echo "${cluster_verb} this machine's model serving: ${serving_units[*]}"
+      fi
+      if ((${#pull_units[@]})); then
+        echo "${cluster_verb} this machine's model downloads: ${pull_units[*]}"
+      fi
     fi
     # Every container Vaelor started outside a Compose project - the cluster
     # balancer, the serving, gate, Ray and pull containers a stopped unit may

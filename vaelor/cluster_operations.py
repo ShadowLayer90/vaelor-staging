@@ -64,6 +64,8 @@ from .copilot_setup import hardware_inventory
 from .cluster_placement import CONTROLLER_PLACEMENT_ID
 from .cluster_network import private_controller_ipv4
 from .runtime_paths import data_path
+from .worker_profile_state import uninstalled_node_ids
+from .worker_profile_probe import docker_on_machine
 
 
 class ClusterOperations(ClusterAgentOperationsMixin):
@@ -205,7 +207,11 @@ class ClusterOperations(ClusterAgentOperationsMixin):
         if not controller_recorded(controller):
             raise ValueError(CONTROLLER_NOT_SET_UP)
         existing_swarm_id = str(node.get("labels", {}).get("swarm_node_id", ""))
-        if node.get("state") == "joined" and existing_swarm_id:
+        # Owner 2026-10-21 (VD-133 1.5.5 #16): Re-add on a worker Vaelor was
+        # uninstalled on is this join, run in full - a purge took Docker and
+        # the Swarm with it - never the "already joined" shortcut.
+        readding = bool(uninstalled_node_ids(self.store, [node["id"]]))
+        if node.get("state") == "joined" and existing_swarm_id and not readding:
             runtime_ids = {
                 str(item.get("id", "")) for item in self.driver.status().get("nodes", [])
             }
@@ -222,10 +228,17 @@ class ClusterOperations(ClusterAgentOperationsMixin):
             inventory, where=str(node.get("host") or node.get("name") or "")
         )
         profile = self.broker.resolve(node["credential_id"], "cluster-node")
+        transport = SshTransport(profile, timeout=120)
+        # Round 1 HIGH (VD-133 1.5.5 #16): Docker is read on the machine now,
+        # not from the enrolment inventory - a purge takes it away while the
+        # inventory still says it is there. An unread answer keeps the old rule.
+        docker_here = docker_on_machine(transport)
+        if docker_here is None:
+            docker_here = bool(inventory.get("docker"))
         result = self.driver.join_worker(
-            SshTransport(profile, timeout=120),
+            transport,
             controller["advertise_address"],
-            install_docker=not bool(inventory.get("docker")),
+            install_docker=not docker_here,
         )
         labels = {
             "vaelor.node_id": node["id"],
@@ -241,6 +254,10 @@ class ClusterOperations(ClusterAgentOperationsMixin):
         }
         self.driver.label_node(result["swarm_node_id"], labels)
         stored_labels = {**labels, "swarm_node_id": result["swarm_node_id"]}
+        if readding:
+            # Adopted 2026-10-21: the drain set when Vaelor was found
+            # uninstalled ends with the owner's Re-add.
+            self.driver.set_node_availability(result["swarm_node_id"], "active")
         self.store.update_node(
             node["id"], state="joined", role="worker", labels=stored_labels
         )
@@ -350,6 +367,7 @@ class ClusterOperations(ClusterAgentOperationsMixin):
                     if str(node_id) != CONTROLLER_PLACEMENT_ID
                 ],
                 self.driver.status(),
+                self.store,
             )
             return path.deploy(payload, progress)
         return deploy_single_or_replicated(

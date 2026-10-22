@@ -1,9 +1,3 @@
-> [!WARNING]
-> **Staging repository for testing Vaelor 1.5.5 release candidates — not a release; use [ShadowLayer90/vaelor](https://github.com/ShadowLayer90/vaelor).**
-> This repository exists only so 1.5.5 can be install-tested before it is released.
-> Its builds are pre-release candidates (currently **1.5.5rc2**) and may be replaced or
-> deleted at any time. Do not install them on a machine you rely on.
-
 <div align="center">
 
 # ⚡ Vaelor
@@ -18,7 +12,7 @@ console, all on the box, nothing forced through the cloud. Add a second machine 
 the same console serves models across both.**
 
 ![License](https://img.shields.io/badge/license-GPL--2.0-blue)
-![Release](https://img.shields.io/badge/staging-1.5.5rc2-red)
+![Release](https://img.shields.io/badge/release-1.5.4-orange)
 ![Flagship](https://img.shields.io/badge/flagship-HP%20Z2%20Mini%20G1a%20·%20Strix%20Halo-orange)
 ![Also runs on](https://img.shields.io/badge/also%20runs%20on-HP%20ZBook%20Ultra%20G1a%20·%20Raspberry%20Pi%205-informational)
 ![Arch](https://img.shields.io/badge/arch-x86--64%20%7C%20ARM64-lightgrey)
@@ -281,14 +275,12 @@ On the target box (Debian-family amd64 for the Z2 Mini or ZBook, arm64 for the P
 
 ```bash
 # On a bare host, install git first: sudo apt install -y git
-git clone https://github.com/ShadowLayer90/vaelor-staging.git ~/vaelor
+git clone https://github.com/ShadowLayer90/vaelor.git ~/vaelor
 
-# One command. The installer downloads the release-candidate wheel itself and, on a box
-# with a neural accelerator (the Strix Halo NPU), also fetches the on-device assistant
-# model (~3.4 GB, split on the release). Both variables are needed on this staging
-# repository: without them the installer pulls the public v1.5.4 release instead.
-sudo VAELOR_REPO=ShadowLayer90/vaelor-staging VAELOR_RELEASE_TAG=v1.5.5rc2 \
-  ~/vaelor/deploy/install-vaelor.sh --unattended
+# One command. The installer downloads the release wheel itself and, on a box with a
+# neural accelerator (the Strix Halo NPU), also fetches the on-device assistant model
+# (~3.4 GB, split on the release):
+sudo ~/vaelor/deploy/install-vaelor.sh --unattended
 ```
 
 Then open the console at `https://<host>:34001/v2/`. The installer creates a certificate
@@ -309,9 +301,7 @@ The first visit asks you to
 create the administrator account. The installer adopts Docker if it is already present and asks before installing
 it when it is not.
 
-On this staging repository, always pass `VAELOR_REPO=ShadowLayer90/vaelor-staging` and
-`VAELOR_RELEASE_TAG=v1.5.5rc2` as shown above. Otherwise the installer downloads from the
-public **`v1.5.4`** release, its default. Set `VAELOR_RELEASE_TAG`
+The installer downloads from the **`v1.5.4`** release by default. Set `VAELOR_RELEASE_TAG`
 to install from another release (for example
 `sudo VAELOR_RELEASE_TAG=v1.5.2 ~/vaelor/deploy/install-vaelor.sh --unattended`), or pass
 `--wheel /path/to/…whl` to install a specific build. A wheel file is only ever installed
@@ -366,11 +356,6 @@ for the cluster model and reloads a serving model that the new version changes, 
 in the same state as re-running the installer; only one update runs at a time.
 You can also update the controller at any time by re-running the
 installer (`git pull` in the clone, then `install-vaelor.sh` again).
-
-On a machine installed from this staging repository, **Update Vaelor** still checks the
-public repository, so it offers the final 1.5.5 once that is released, not further
-release candidates. To have it read this repository instead, the Vaelor services need
-`VAELOR_UPDATE_REPO=ShadowLayer90/vaelor-staging` in their environment.
 
 ## 🤝 Contributing & docs
 

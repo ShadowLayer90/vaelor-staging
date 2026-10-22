@@ -213,7 +213,10 @@ leave_worker_role_now() {
   if command -v apt-mark >/dev/null 2>&1; then
     apt-mark unhold amdrocm-amdsmi7.14 amdrocm-sysdeps7.14 >/dev/null 2>&1 || true
   fi
-  rm -f "${WORKER_PROFILE_MARKER}"
+  # The record a worker's own uninstall leaves (worker_profile.UNINSTALLED_PATH,
+  # VD-133 1.5.5 #16) goes too: this machine is a full appliance from here,
+  # and its old controller must read it as one, not as uninstalled.
+  rm -f "${WORKER_PROFILE_MARKER}" /etc/vaelor/worker-uninstalled.json
   echo "The worker profile was taken off this machine; installing the full appliance."
 }
 

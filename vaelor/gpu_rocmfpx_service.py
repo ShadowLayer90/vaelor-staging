@@ -556,6 +556,20 @@ def _fork_serve_args(
     ]
 
 
+def launch_context_window(runtime: Any) -> int:
+    """The window a launch of ``runtime`` passes the engine, or 0 when unknown.
+
+    The mainline image is told ``-c`` (:func:`_mainline_context`, the same
+    reading :func:`gpu_container_command` makes, so a recorded window and the
+    flag cannot disagree - LESSONS 6). The fork's own ``run_server.sh`` applies
+    its window, which Vaelor does not pass and so does not claim (owner
+    2026-10-21: an unknown window is left undeclared, never guessed).
+    """
+    resolved = _runtime_mapping(runtime)
+    engine = resolved.get("engine")
+    return _mainline_context(resolved) if _engine_container(engine).entrypoint else 0
+
+
 def gpu_container_command(
     model_path: str,
     port: int,

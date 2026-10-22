@@ -436,7 +436,12 @@ def _task_owner(record: Dict[str, Any]) -> tuple[str, Optional[str]]:
 
 def _error(record: Dict[str, Any], state: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
     result = record.get("result") if isinstance(record.get("result"), dict) else {}
-    message = str(record.get("error") or result.get("message") or "")[:2000]
+    # A run that ended well (`RETRY_RESOLVING_STATES`) has no error: its
+    # result's sentence is its outcome, carried as `message` and `result`.
+    # Filing it here made the console read "Finished" and "This operation
+    # needs attention." about one job (owner 2026-10-21 follow-up list).
+    message = "" if state in RETRY_RESOLVING_STATES else str(
+        record.get("error") or result.get("message") or "")[:2000]
     recoverable = state in {"failed", "waiting", "needs_approval", "paused", "cancelled"}
     error = {
         "code": str(result.get("code", "operation_failed" if message else ""))[:120],

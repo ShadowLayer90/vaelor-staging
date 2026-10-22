@@ -28,6 +28,10 @@ import "../styles/restart-dialog.css";
  * A worker's restart cuts no job off: Vaelor runs one job at a time and the
  * restart is itself one, so it waits behind what runs now. That is said too,
  * with how long it may wait.
+ *
+ * The read covers jobs only. An empty list says no job is running and never
+ * that nothing is: the models and apps a machine serves stop with it whatever
+ * the list holds, and each caller's `description` says so for its action.
  */
 export function RestartDialog({
   machine,
@@ -150,9 +154,12 @@ export function RestartDialog({
         </Notice>
       )}
       {impact && !impact.readable && <Notice severity="warning">{impact.reason}</Notice>}
+      {/* What was checked is jobs, so that is all this line may clear; what stops is the
+          caller's `description` (found live 2026-10-21: "Nothing Vaelor is running would be cut
+          off" while a 30B model served AI Chat on both machines; LESSONS 5 and 8). */}
       {impact && impact.readable && count === 0 && (
         <p className="cl-meta restart-impact__none">
-          {interrupts ? "Nothing Vaelor is running would be cut off." : "Nothing else Vaelor is running is in the way."}
+          {interrupts ? "No Vaelor job is running now, so none is cut off." : "No other Vaelor job is running now."}
         </p>
       )}
       {impact && count > 0 && (

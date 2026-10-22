@@ -2,7 +2,7 @@ import { type ReactNode, useRef, useState } from "react";
 import { useFollowScroll } from "../hooks/useFollowScroll";
 import type { AiChatCitation, AiChatMessage } from "./aiChatTypes";
 import { modelDisplayName } from "../lib/modelIdentity";
-import { modelThatWrote, writtenByVaelor } from "../lib/aiChatExport";
+import { answerCutOffNote, modelThatWrote, writtenByVaelor } from "../lib/aiChatExport";
 import { performanceLine } from "../lib/performanceLine";
 import { AiChatMarkdown } from "./AiChatMarkdown";
 import { AiChatThought } from "./AiChatThinking";
@@ -218,6 +218,8 @@ export function AiChatThread({
         const retrieval = !isUser && !pendingTail && !(searchedWeb.startsWith("Searched") && !message.retrieval?.searched)
           ? retrievalLabel(message.retrieval) : "";
         const performance = !isUser && !pendingTail ? performanceLine(message.metadata?.performance) : "";
+        // VD-206: an answer that stopped early says so under it, never passing for finished.
+        const cutOff = !isUser && !pendingTail ? answerCutOffNote(message.metadata?.cut_off) : "";
         /*
          * A question whose answer never arrived is the one turn that most
          * needs a retry, and it was the one turn with no action on it. The
@@ -263,6 +265,7 @@ export function AiChatThread({
               <div className="ai-chat-turn__bubble">
                 {isUser ? <p>{message.content}</p> : <AiChatMarkdown content={message.content} />}
               </div>
+              {cutOff && <p className="ai-chat-turn__cut-off" role="note">{cutOff}</p>}
               </>
             )}
             {!isEditing && !pendingTail && (

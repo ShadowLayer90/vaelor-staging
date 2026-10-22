@@ -12,7 +12,7 @@ import {
 } from "../lib/operationOwner";
 import type { Session } from "../types";
 import { Icon, type IconName } from "./Icon";
-import { OperationOwner } from "./OperationOwner";
+import { OperationOwner, operationResultSentence } from "./OperationOwner";
 import { RecordConfirm, RecordFacts, RecordPager } from "./RecordKit";
 import { StatusPill } from "./StatusPill";
 import { Button, Card, LoadingLines, Notice, type StatusTone } from "./ui";
@@ -153,9 +153,9 @@ function ownerRoute(operation: OperationProjection): string | null {
   return operation.owner_route ?? operation.owner?.route ?? null;
 }
 
-/** Whether the read-only owner card already shows the message (its summary or error notice). */
+/** Whether the read-only owner card already shows the message (its status, error notice or Result). */
 export function messageShownByOwner(operation: OperationProjection): boolean {
-  return Boolean(operation.message || operation.recoverable_error?.message);
+  return Boolean(operation.message || operation.recoverable_error?.message || operationResultSentence(operation));
 }
 
 function operationMessage(operation: OperationProjection): string {

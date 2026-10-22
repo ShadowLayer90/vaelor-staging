@@ -1,4 +1,5 @@
 import type { PerformanceSummary } from "../lib/performanceLine";
+import type { AnswerCutOff } from "../lib/aiChatExport";
 import type { AiChatWebSearchRecord } from "./AiChatWebSearch";
 
 export interface AiChatConnection {
@@ -116,6 +117,12 @@ export interface AiChatMessage {
      * instead of a guess - which state Web search was in ("off", "unavailable").
      */
     web_search?: AiChatWebSearchRecord | string;
+    /**
+     * VD-206: why this answer stopped before its end - the model's
+     * answer-length limit, or the 12,000 characters AI Chat keeps
+     * (`ANSWER_CUT_OFF_CAUSES`). Absent on a finished answer.
+     */
+    cut_off?: AnswerCutOff;
   };
 }
 

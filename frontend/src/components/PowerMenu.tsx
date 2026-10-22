@@ -38,7 +38,7 @@ const actionCopy: Record<
   reboot: {
     title: "Reboot this device?",
     description:
-      "All active sessions and services will stop while the device restarts.",
+      "Every model, app and session on this device stops, and AI Chat and the Assistant stop answering, until it has restarted. Any model another machine serves through this controller stops answering too.",
     label: "Reboot device",
     confirmation: "reboot-device",
     consequence: "Stops every session and running app until it restarts",
@@ -46,7 +46,7 @@ const actionCopy: Record<
   shutdown: {
     title: "Shut down this device?",
     description:
-      "Remote access will be lost and physical power may be required to start it again.",
+      "Every model, app and session on this device stops, and AI Chat and the Assistant stop answering. They stay stopped until the device is started again, which may need physical power, and remote access is lost until then. Any model another machine serves through this controller stops answering too.",
     label: "Shut down",
     confirmation: "shutdown-device",
     consequence: "Ends remote access; restarting may need physical power",

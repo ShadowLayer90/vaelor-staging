@@ -747,7 +747,7 @@ class ClusterManager(WorkerTelemetryMixin, WorkerProfileMixin):
             raise
         return node
 
-    def refresh_node(self, node_id: str) -> Dict[str, Any]:
+    def refresh_node(self, node_id: str, requested_by: Any = None) -> Dict[str, Any]:
         """Recheck: re-probe a worker, then check its telemetry agent.
 
         Returns the refreshed record with a ``telemetry`` outcome
@@ -756,6 +756,7 @@ class ClusterManager(WorkerTelemetryMixin, WorkerProfileMixin):
         missing-unit failure never fails the capacity half - but its outcome is
         no longer thrown away (ACC-121): a re-key, a reinstall or a failure is
         returned here and recorded by the route, like every other change.
+        ``requested_by`` (who pressed it) attributes the updates it queues.
         """
         try:
             refreshed = self._reprobe_node(node_id)
@@ -763,7 +764,7 @@ class ClusterManager(WorkerTelemetryMixin, WorkerProfileMixin):
             self.note_worker_profile_unreached(node_id, error)
             raise
         try:
-            outcome = dict(self.reconcile_worker_telemetry(node_id, recheck=True) or {})
+            outcome = dict(self.reconcile_worker_telemetry(node_id, recheck=True, requested_by=requested_by) or {})
             outcome["message"] = reconcile_sentence(outcome)
         except Exception as error:  # noqa: BLE001 - reported, never raised
             LOGGER.warning(
@@ -778,7 +779,7 @@ class ClusterManager(WorkerTelemetryMixin, WorkerProfileMixin):
             }
         refreshed["telemetry"] = outcome
         # VD-194 P1: Recheck also reads the worker's software (read-only).
-        refreshed["worker_software"] = self.recheck_worker_profile_contained(node_id)
+        refreshed["worker_software"] = self.recheck_worker_profile_contained(node_id, requested_by=requested_by)
         return refreshed
 
     def _reprobe_node(self, node_id: str) -> Dict[str, Any]:

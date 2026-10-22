@@ -577,6 +577,7 @@ class GpuPoolOperations:
             units["idle_timeout"] = idle_timeout_from_payload(payload)
             credential_id = register_cluster_credential(
                 self.broker, name, endpoint, repo, api_key, payload, report,
+                context_window=max_model_len,
             )
             if entered:
                 # The cluster is healthy and tested: AI Chat and, if it was on

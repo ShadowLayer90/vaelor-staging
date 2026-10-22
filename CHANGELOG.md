@@ -1,5 +1,55 @@
 # Change log
 
+## 1.5.5 Release Candidate 4
+
+The fourth staging build. It closes the list of smaller issues found while
+checking Release Candidate 3:
+
+- **The Assistant and agents read a mixture-of-experts model by its full
+  size.** A name like Qwen3-30B-A3B is a 30B model; it was read as 3B, so the
+  Assistant and agents gave it the budgets of a small model. AI Chat, the
+  Assistant, agents and the model tiers now read every model's size the same
+  way.
+- **Custom agents get context in line with their model.** On a model over 8B
+  that Vaelor runs, a custom agent now receives far more of its sources and
+  memory; small models keep what they had.
+- **Vaelor records the context window it serves each model with,** so a large
+  request is trimmed to fit instead of being refused for length. A machine that
+  updates fills these in for Vaelor's own models within minutes of starting;
+  connections you added are never changed.
+- **Automatic changes to workers are in the security audit log,** under
+  "Vaelor (automatic repair)", or under you when your Recheck caused them.
+- **Re-add takes effect with one press,** and reads Docker on the machine
+  without needing Python (a Docker installed as a snap is recognised).
+- **Activity says one thing about how an operation ended.** An operation
+  Vaelor declined on purpose reads as finished, with its reason, not as both
+  finished and needing attention.
+- **The page behind a confirmation is usable the moment it closes;** for a
+  moment afterwards, clicks were lost.
+
+## 1.5.5 Release Candidate 3
+
+The third staging build. It fixes what the checks of Release Candidate 2 found,
+and makes two changes the owner asked for:
+
+- **AI Chat shows when an answer was cut off.** An answer that stopped at the
+  model's answer-length limit, or ran past the 12,000 characters AI Chat keeps,
+  shows a note under it saying the end is missing, also after a reload, in a
+  branch and in an export.
+- **Longer answers from large local models.** A model over 8B that Vaelor runs
+  itself (the cluster's 30B, the GPU's 27B) may answer with up to 2,048 tokens
+  instead of 1,024, is given 240 seconds instead of 120, and is no longer told
+  to keep plain answers under 120 words. Smaller models keep their own limits.
+- **A worker uninstalled on the machine stays uninstalled.** When Vaelor is
+  uninstalled on a worker that is still in a cluster, the controller no longer
+  puts its software back. The machine's card says so, with Re-add and Remove,
+  and the controller stops the cluster placing new work there. The uninstall
+  names the model serving it stopped. This needs the uninstaller from this
+  release on the worker.
+- **The restart and shut-down confirmations tell the truth.** They said nothing
+  was running whenever no Vaelor job was, even while models served AI Chat; they
+  now say no job is running, and what a reboot or shut down stops.
+
 ## 1.5.5 Release Candidate 2
 
 The second staging build. It adds three changes the owner asked for after

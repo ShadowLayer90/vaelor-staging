@@ -106,6 +106,9 @@ TARGET_KINDS: Dict[str, str] = {
     "cluster.node.enroll": "node",
     "cluster.node.remove": "node",
     "cluster.node.architecture-eviction": "node",
+    # The automatic drain and worker software update (owner 2026-10-21 follow-up list).
+    "cluster.node.drain": "node",
+    "cluster.node.profile": "node",
     "cluster.telemetry.install": "node",
     "cluster.telemetry.reconcile": "node",
     "cluster.telemetry.remove": "node",

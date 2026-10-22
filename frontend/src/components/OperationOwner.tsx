@@ -300,7 +300,14 @@ function artifactName(artifact: OperationArtifact, index: number): string {
   return artifact.name ?? artifact.kind ?? `Artifact ${index + 1}`;
 }
 
-function operationResultSummary(operation: OperationOwnerOperation): string | null {
+/**
+ * The sentence the card's Result section takes from the operation's own
+ * result, or null when it has none and would fall back to a stock line.
+ * Activity's and Cluster's detail lists ask this rather than re-deriving it,
+ * so their "Message" row neither repeats it nor reads "—" beside it (owner
+ * 2026-10-21 follow-up list).
+ */
+export function operationResultSentence(operation: OperationOwnerOperation): string | null {
   // The backend builds a failed operation's `message` and `result_summary`
   // from the same record, so a summary string that equals the error is the
   // error arriving by a second door — the attention Notice already shows it
@@ -317,6 +324,15 @@ function operationResultSummary(operation: OperationOwnerOperation): string | nu
       const value = data[key];
       if (fresh(value)) return value;
     }
+  }
+  return null;
+}
+
+function operationResultSummary(operation: OperationOwnerOperation): string | null {
+  const sentence = operationResultSentence(operation);
+  if (sentence) return sentence;
+  const data = operation.result_summary?.data;
+  if (isRecord(data)) {
     if (!operationIsTerminal(operation.state)) {
       return "The operation returned technical details while it continues.";
     }
@@ -332,8 +348,11 @@ function operationResultSummary(operation: OperationOwnerOperation): string | nu
       cancelled: "The operation was cancelled.",
       superseded: "A newer attempt replaced this operation.",
     };
-    return endings[operation.state]
-      ?? "The operation completed. Technical details are available below.";
+    // Owner 2026-10-21 follow-up list: "Technical details are available
+    // below" was said over a card that rendered none.
+    return endings[operation.state] ?? (operationTechnicalResult(operation) === null
+      ? "The operation completed."
+      : "The operation completed. Technical details are available below.");
   }
   return null;
 }
@@ -408,6 +427,12 @@ export function OperationOwner({
   // not shown as a problem, and a restart's cut-off is not "Failed".
   const failed = operation.state === "failed";
   const settled = failed ? settledFailure(operation) : null;
+  // VD-139: whether it needs the owner is the server's verdict, rendered, not
+  // re-derived from "an error sentence is present". A cancelled run, or one
+  // that ended well, read "This operation needs attention." while the Activity
+  // tiles counted it finished (owner 2026-10-21 follow-up list). A payload
+  // without the verdict keeps the old reading.
+  const attention = operation.needs_attention !== false;
   const lastEventMs = timestampMs(operation.timestamps?.updated_at)
     ?? timestampMs(operation.timestamps?.started_at);
   const stalledSince = lastEventMs === null ? "its last event" : timeAgo(lastEventMs);
@@ -423,7 +448,10 @@ export function OperationOwner({
   // card, because `operation.message` mirrors `recoverable_error.message` and
   // three surfaces each rendered their copy. The attention Notice owns the
   // error; everything else shows a text only when it says something different.
+  // The same holds for a finished operation's outcome: once the Result
+  // section says it, the status strip does not (owner 2026-10-21 follow-up).
   const statusMessage = operation.message && operation.message !== error?.message
+    && operation.message !== resultSummary
     ? operation.message
     : undefined;
   const feedbackMessage = feedback?.message ?? controllerError ?? statusMessage;
@@ -569,7 +597,7 @@ export function OperationOwner({
       <OperationFeedback className="operation-owner__feedback" message={feedbackMessage} state={feedbackState} />
 
       {error?.message && (
-        <Notice className="operation-owner__error" heading={settled ? settled.note : "This operation needs attention."} severity={settled ? "info" : error.recoverable === false ? "danger" : "warning"}>
+        <Notice className="operation-owner__error" heading={settled ? settled.note : attention ? "This operation needs attention." : undefined} severity={settled || !attention ? "info" : error.recoverable === false ? "danger" : "warning"}>
           <span>{error.message}</span>
           {/* The raw error code (`operation_failed`) was shown to the owner
               here; the support reference at the foot of the card is the

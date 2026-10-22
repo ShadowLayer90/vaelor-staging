@@ -138,11 +138,13 @@ def register_chat_routes(context: ApiContext) -> None:
 
     def turn_metadata(result, web=None):
         """What a stored answer says about itself: its timing, the provider's
-        thinking summary when it returned one (VD-209 item 4), and the web
-        search behind it (VD-221)."""
+        thinking summary when it returned one (VD-209 item 4), why it stopped
+        early if it did (VD-206), and the web search behind it (VD-221)."""
         metadata = {"performance": result.get("performance") or {}}
         if result.get("thinking"):
             metadata["thinking"] = result["thinking"]
+        if result.get("cut_off"):  # VD-206: a cut answer is never shown as finished
+            metadata["cut_off"] = result["cut_off"]
         return {**metadata, **(web.metadata if web is not None else {})}
 
     def web_turn(body, message, model, retrieved, history):

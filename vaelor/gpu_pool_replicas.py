@@ -73,7 +73,6 @@ then tears down. No automatic eviction, no re-placement.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass, replace
@@ -107,6 +106,8 @@ from .model_thinking import THINKING_FIELD
 from .vllm_serve_options import OPTIONS_FIELD
 from .vllm_moe_kernels import started_copy_note
 from .ssh_transport import SshTransportError
+from .credential_provider_probe import served_profile
+from .token_estimate import CONTEXT_WINDOW_KEY
 
 LOGGER = logging.getLogger(__name__)
 
@@ -850,14 +851,11 @@ def _reput_cluster_key(
     preserved from the lease. A ``put`` with the existing id bumps the version
     and re-encrypts, exactly as an outbound-credential rotation does.
     """
-    profile = json.dumps(
-        {
-            "base_url": str(lease.get("base_url", "") or ""),
-            "model": str(lease.get("model", "") or ""),
-            "api_key": str(new_key),
-        },
-        separators=(",", ":"),
-    )
+    # The recorded window rides along (owner 2026-10-21): a key rotation must
+    # not drop the field the budgets clamp to (LESSONS 24).
+    profile = served_profile(
+        str(lease.get("base_url", "") or ""), str(lease.get("model", "") or ""), str(new_key),
+        context_window=lease.get(CONTEXT_WINDOW_KEY))
     return broker.put(
         "openai-compatible", str(lease.get("label", "") or ""), profile, credential_id
     )
@@ -961,7 +959,11 @@ def rotate_cluster_serving_key(
     )
     report(60, "Restarting the balancer on the new cluster key")
     with serving_lock():
-        rekeyed = _reput_cluster_key(broker, credential_id, lease, new_key)
+        # Read the credential again under the lock: a window recorded since
+        # the read above (the served-window backfill, owner 2026-10-21) must
+        # ride along, not be overwritten by that earlier copy (LESSONS 24).
+        current = broker.resolve(credential_id, CLUSTER_INFERENCE_PURPOSE)
+        rekeyed = _reput_cluster_key(broker, credential_id, current, new_key)
         balancer.start(deployment, new_key)
     report(85, "Retiring the old key from every worker gate")
     _rekey_worker_gates(

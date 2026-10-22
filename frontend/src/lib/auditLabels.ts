@@ -126,6 +126,9 @@ const exactLabels: Record<string, string> = {
   "cluster.node.remove": "Removed a worker",
   "cluster.link.set": "Changed the cluster link",
   "cluster.node.availability": "Changed worker availability",
+  // Written by Vaelor itself, never by an owner (owner 2026-10-21 follow-up list, ACC-121).
+  "cluster.node.drain": "Drained a worker in the cluster",
+  "cluster.node.profile": "Updated a worker's software",
   "cluster.node.architecture-eviction":
     "Drained and removed a worker of the wrong processor architecture",
   "cluster.ssh.inspect": "Inspected a worker over SSH",
@@ -344,6 +347,8 @@ export const OUTCOME_NEUTRAL_ACTIONS: ReadonlySet<string> = new Set([
 const startedLabels: Record<string, string> = {
   "application.draft.research": "Queued research on an application draft",
   "application.draft.research.capable": "Queued research on an application draft with the larger model",
+  "cluster.node.drain": "Queued a drain of a worker in the cluster",
+  "cluster.node.profile": "Queued an update of a worker's software",
   "model.install_release": "Started installing a released model",
   "power.reboot": "Started a reboot of this appliance",
   "power.restart_service": "Started a restart of the Vaelor control plane",
@@ -385,7 +390,9 @@ const attemptLabels: Record<string, string> = {
   "auth.mfa": "Refused a two-factor code",
   "cluster.link.set": "Tried to change the cluster link",
   "cluster.node.architecture-eviction": "Tried to remove a worker of the wrong processor architecture",
+  "cluster.node.drain": "Tried to queue a drain of a worker in the cluster",
   "cluster.node.enroll": "Tried to enrol a worker",
+  "cluster.node.profile": "Tried to queue an update of a worker's software",
   "cluster.performance.kernel-profile": "Tried a GPU kernel profile (restarts the model)",
   "cluster.performance.profile": "Tried to capture a serving performance profile",
   "cluster.telemetry.install": "Tried to install worker telemetry",

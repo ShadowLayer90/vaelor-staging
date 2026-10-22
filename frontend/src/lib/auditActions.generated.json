@@ -108,7 +108,9 @@
     "cluster.backup.delete",
     "cluster.link.set",
     "cluster.node.architecture-eviction",
+    "cluster.node.drain",
     "cluster.node.enroll",
+    "cluster.node.profile",
     "cluster.node.remove",
     "cluster.performance.kernel-profile",
     "cluster.performance.profile",
@@ -535,9 +537,17 @@
       "failure",
       "success"
     ],
+    "cluster.node.drain": [
+      "failure",
+      "queued"
+    ],
     "cluster.node.enroll": [
       "failure",
       "success"
+    ],
+    "cluster.node.profile": [
+      "failure",
+      "queued"
     ],
     "cluster.node.remove": [
       "success"
@@ -810,6 +820,7 @@
     "vaelor/api_mcp_catalog_routes.py:_audit",
     "vaelor/api_operation_routes.py:audit",
     "vaelor/api_skills_routes.py:_audit",
-    "vaelor/api_upgrade_routes.py:audit"
+    "vaelor/api_upgrade_routes.py:audit",
+    "vaelor/worker_profile_job.py:_audit_row"
   ]
 }

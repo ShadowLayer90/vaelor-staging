@@ -21,8 +21,8 @@ export interface ExportMessage {
   model?: string;
   /** Set by the client that wrote a failure notice. */
   failed?: boolean;
-  /** Set by the appliance on a stored failure notice. */
-  metadata?: { failed?: boolean };
+  /** Set by the appliance: a stored failure notice, or why an answer stopped early. */
+  metadata?: { failed?: boolean; cut_off?: string };
 }
 
 /** The conversation fields the export needs. */
@@ -67,6 +67,35 @@ export function answeredByLine(provider: string | undefined, model: string | und
   return `${provider ?? ""} · ${model ?? ""}${temporary ? " · not saved" : ""}`;
 }
 
+/**
+ * VD-206, never cut silently: why an answer stopped before its end, as the
+ * appliance records it in `metadata.cut_off` - the model's answer-length limit,
+ * or the 12,000 characters AI Chat keeps (`vaelor.chat_answer_text.CUT_OFF_CAUSES`
+ * and `ANSWER_KEPT_CHARS`, which `tests/test_wire_vocabularies.py` and
+ * `tests/test_ai_chat_cut_off.py` hold this copy to). Found live 2026-10-21: a
+ * long cluster answer ended mid-sentence and read as finished (VD-133 1.5.5).
+ */
+export const ANSWER_CUT_OFF_CAUSES = ["model_limit", "kept_limit"] as const; // vocabulary: answer-cut-off
+export type AnswerCutOff = (typeof ANSWER_CUT_OFF_CAUSES)[number];
+
+/*
+ * What to do next. Not "ask it to continue": earlier turns reach the model as
+ * their first 3,000 characters only, so the missing end is never sent back and
+ * a continuation would be a guess (review M1).
+ */
+const CUT_OFF_ADVICE = "Ask for a shorter answer, or ask for it in parts.";
+
+/** The note under an answer that stopped early, by its recorded cause; "" claims nothing. */
+export function answerCutOffNote(cutOff: string | undefined): string {
+  if (cutOff === "model_limit") {
+    return `This answer stopped at the model's answer-length limit, so the end is missing. ${CUT_OFF_ADVICE}`;
+  }
+  if (cutOff === "kept_limit") {
+    return `This answer was longer than the 12,000 characters AI Chat keeps, so the end is missing. ${CUT_OFF_ADVICE}`;
+  }
+  return "";
+}
+
 function heading(message: ExportMessage): string {
   if (message.role === "user") return "You";
   const author = modelThatWrote(message.model);
@@ -92,7 +121,10 @@ export function conversationExportMarkdown(
   return [
     `# ${conversation.title}`, "",
     ...cut,
-    ...messages.flatMap((message) => [`## ${heading(message)}`, "", message.content, ""]),
+    ...messages.flatMap((message) => {
+      const cut = message.role === "user" ? "" : answerCutOffNote(message.metadata?.cut_off);
+      return [`## ${heading(message)}`, "", message.content, "", ...(cut ? [`> ${cut}`, ""] : [])];
+    }),
   ].join("\n");
 }
 

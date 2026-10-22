@@ -300,6 +300,12 @@ class DockerSwarmDriver:
         return "not part of a swarm" in message.lower()
 
     @staticmethod
+    def _docker_absent(message: str) -> bool:
+        # The shell or sudo saying there is no `docker` to run: a purged worker.
+        text = message.lower()
+        return "docker: command not found" in text or "docker: not found" in text
+
+    @staticmethod
     def _node_already_removed(message: str) -> bool:
         text = message.lower()
         return "not found" in text or "no such node" in text
@@ -341,6 +347,7 @@ class DockerSwarmDriver:
             if not force:
                 raise
         leave_error = ""
+        docker_absent = False
         try:
             arguments = ["docker", "swarm", "leave"]
             if force:
@@ -348,9 +355,14 @@ class DockerSwarmDriver:
             transport.run(arguments, sudo=True, timeout=180)
         except Exception as error:
             leave_error = str(error)
+            # VD-133 1.5.5 #16 round 1 M3: a purge took Docker off the machine,
+            # so it has no cluster membership of its own left to give up.
+            docker_absent = self._docker_absent(leave_error)
+            if docker_absent:
+                leave_error = ""
             # A worker already out of the swarm is success, not a failure to
             # leave; only a genuinely stuck or unreachable worker aborts.
-            if not force and not self._already_left_swarm(leave_error):
+            if not force and not docker_absent and not self._already_left_swarm(leave_error):
                 raise ClusterDriverError(
                     "The worker could not leave cleanly. Reconnect it or review a forced removal."
                 ) from error
@@ -375,6 +387,7 @@ class DockerSwarmDriver:
             "swarm_node_id": str(swarm_node_id),
             "forced": bool(force),
             "worker_leave_warning": leave_error[:300],
+            "docker_absent": docker_absent,
         }
 
     def deploy_llm(

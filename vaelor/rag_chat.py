@@ -13,6 +13,7 @@ from contextlib import closing
 from typing import Any, Dict, Optional, Sequence
 
 from .chat_appliance_scope import APPLIANCE_SCOPE_PROVIDER, LIVE_FACTS_PROVIDER
+from .chat_answer_text import ANSWER_KEPT_CHARS, stored_cut_off
 from .chat_thinking_store import stored_thinking
 from .conversation_titles import conversation_title
 from .document_text import DocumentExtractionError, extract_text
@@ -115,6 +116,9 @@ def _message_metadata(value: Any) -> Dict[str, Any]:
     thinking = stored_thinking(value.get("thinking"))  # VD-209, bounded
     if thinking:
         metadata["thinking"] = thinking
+    cut_off = stored_cut_off(value.get("cut_off"))  # VD-206: a reload keeps the cut
+    if cut_off:
+        metadata["cut_off"] = cut_off
     web = _web_search_view(value.get("web_search"))  # VD-221, bounded
     if web:
         metadata["web_search"] = web
@@ -716,7 +720,7 @@ class RagChatStore:
                 (conversation_id,role,content,citations_json,created_at,retrieval_json,model,metadata_json)
                 VALUES(?,?,?,?,?,?,?,?)
                 """,
-                (conversation_id, role, str(content)[:12000],
+                (conversation_id, role, str(content)[:ANSWER_KEPT_CHARS],
                  json.dumps(citations or []), now, json.dumps(retrieval or {}),
                  str(model)[:200], json.dumps(stored_metadata)),
             )
@@ -727,7 +731,7 @@ class RagChatStore:
             connection.commit()
         return {
             "id": cursor.lastrowid, "conversation_id": conversation_id,
-            "role": role, "content": str(content)[:12000],
+            "role": role, "content": str(content)[:ANSWER_KEPT_CHARS],
             "citations": citations or [], "created_at": now,
             "retrieval": retrieval or {}, "model": str(model)[:200],
             "metadata": stored_metadata,
@@ -751,7 +755,7 @@ class RagChatStore:
                 (conversation_id,role,content,citations_json,created_at)
                 VALUES(?,?,?,?,?)
                 """,
-                (conversation_id, "user", user_text[:12000], "[]", now),
+                (conversation_id, "user", user_text[:ANSWER_KEPT_CHARS], "[]", now),
             )
             cursor = connection.execute(
                 """
@@ -760,7 +764,7 @@ class RagChatStore:
                 VALUES(?,?,?,?,?,?,?)
                 """,
                 (
-                    conversation_id, "assistant", assistant_text[:12000],
+                    conversation_id, "assistant", assistant_text[:ANSWER_KEPT_CHARS],
                     json.dumps(citations or []), now, json.dumps(retrieval or {}),
                     str(model)[:200],
                 ),
@@ -772,7 +776,7 @@ class RagChatStore:
             connection.commit()
         return {
             "id": cursor.lastrowid, "conversation_id": conversation_id,
-            "role": "assistant", "content": assistant_text[:12000],
+            "role": "assistant", "content": assistant_text[:ANSWER_KEPT_CHARS],
             "citations": citations or [], "created_at": now,
             "retrieval": retrieval or {}, "model": str(model)[:200],
             "metadata": {},
