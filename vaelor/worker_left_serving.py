@@ -74,12 +74,13 @@ UNIT_READS = (
 #: Every container, one per line: ``name|owner label|compose project``. Each
 #: label is read on its own, as the uninstaller's `remove_vaelor_containers`
 #: reads them: ``{{.Labels}}`` joins every label with commas, so a label VALUE
-#: holding ",io.vaelor.owner=..." would read as Vaelor's own label. ``index``
-#: on a missing key prints "" in current Docker; ``<no value>`` (what a field
-#: access prints) is read as empty too, for any Docker that prints it.
+#: holding ",io.vaelor.owner=..." would read as Vaelor's own label. In
+#: ``docker ps`` ``.Labels`` is that joined STRING, so ``index .Labels`` fails
+#: ("cannot index slice/array with type string", found live on Docker 29.1.3,
+#: 2026-10-22); ``.Label "key"`` prints one label's value, or nothing.
 CONTAINER_READ = (
     "docker", "ps", "-a", "--format",
-    '{{{{.Names}}}}|{{{{index .Labels "{}"}}}}|{{{{index .Labels "{}"}}}}'.format(
+    '{{{{.Names}}}}|{{{{.Label "{}"}}}}|{{{{.Label "{}"}}}}'.format(
         VAELOR_OWNER_LABEL, COMPOSE_PROJECT_LABEL),
 )
 _NO_VALUE = "<no value>"

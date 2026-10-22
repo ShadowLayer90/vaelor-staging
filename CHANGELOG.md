@@ -1,5 +1,13 @@
 # Change log
 
+## 1.5.5 Release Candidate 7
+
+Release Candidate 6 with one fix found by its fresh install:
+
+- **Adding a worker now also removes model-serving containers an earlier
+  controller left.** Release Candidate 6 removed the services but could not
+  read the containers' labels on current Docker, and said so.
+
 ## 1.5.5 Release Candidate 6
 
 Release Candidate 5 with one fix found by its fresh install:
